@@ -1,3 +1,46 @@
+from flask import Flask, request, jsonify
+import pdfplumber
+import io
+import os
+
+app = Flask(__name__)
+
+@app.route("/", methods=["GET"])
+def health():
+    return "PDF Extractor is running"
+
+@app.route("/extract", methods=["POST"])
+def extract_pdf():
+    if "file" not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+
+    file = request.files["file"]
+
+    if not file.filename.endswith(".pdf"):
+        return jsonify({"error": "File must be a PDF"}), 400
+
+    try:
+        pdf_bytes = file.read()
+        text = ""
+
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            for page in pdf.pages:
+                text += page.extract_text() or ""
+
+        return jsonify({
+            "success": True,
+            "text": text
+        })
+
+    except Exception as e:
+        return jsonify({
+            "error": str(e)
+        }), 500
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
 import functions_framework
 import pdfplumber
 from flask import Request, jsonify
