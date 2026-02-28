@@ -1,95 +1,72 @@
 from flask import Flask, request, jsonify
-import os
 import io
 
-# 1) Primary extractor: PyMuPDF
 import fitz  # PyMuPDF
-
-# 2) Secondary extractor: pdfplumber (pdfminer)
 import pdfplumber
-
 
 app = Flask(__name__)
 
-
 @app.get("/")
 def health():
-    return "OK"
-
+    return "PDF Extractor is running"
 
 def extract_with_pymupdf(pdf_bytes: bytes) -> str:
-    text_parts = []
-    with fitz.open(stream=pdf_bytes, filetype="pdf") as doc:
-        for page in doc:
-            # "text" is usually best general-purpose
-            t = page.get_text("text") or ""
-            text_parts.append(t)
-    return "\n".join(text_parts).strip()
-
+    text_all = []
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    for page in doc:
+        t = page.get_text("text") or ""
+        if t.strip():
+            text_all.append(t)
+    doc.close()
+    return "\n".join(text_all).strip()
 
 def extract_with_pdfplumber(pdf_bytes: bytes) -> str:
-    text_parts = []
+    text_all = []
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         for page in pdf.pages:
             t = page.extract_text() or ""
-            text_parts.append(t)
-    return "\n".join(text_parts).strip()
-
+            if t.strip():
+                text_all.append(t)
+    return "\n".join(text_all).strip()
 
 @app.post("/extract")
-def extract():
+def extract_pdf():
     if "file" not in request.files:
-        return jsonify({"ok": False, "error": "No file part 'file' in multipart/form-data"}), 400
+        return jsonify({"ok": False, "error": "No file provided (form-data field name must be 'file')"}), 400
 
     f = request.files["file"]
-    filename = (f.filename or "").lower()
-
-    if not filename.endswith(".pdf"):
-        return jsonify({"ok": False, "error": "File must be a PDF (.pdf)"}), 400
+    if not (f.filename or "").lower().endswith(".pdf"):
+        return jsonify({"ok": False, "error": "File must be a PDF"}), 400
 
     pdf_bytes = f.read()
-    if not pdf_bytes or len(pdf_bytes) < 100:
-        return jsonify({"ok": False, "error": "Empty/invalid PDF upload"}), 400
+    if not pdf_bytes:
+        return jsonify({"ok": False, "error": "Empty file bytes received"}), 400
 
-    warnings = []
-    text = ""
-    method_used = None
-
-    # Try PyMuPDF first
+    # 1) Try PyMuPDF
     try:
         text = extract_with_pymupdf(pdf_bytes)
-        method_used = "pymupdf"
+        if text:
+            return jsonify({"ok": True, "engine": "pymupdf", "text": text})
     except Exception as e:
-        warnings.append(f"pymupdf_failed: {str(e)}")
+        pymupdf_err = str(e)
+    else:
+        pymupdf_err = None
 
-    # If empty, try pdfplumber
-    if not text:
-        try:
-            text = extract_with_pdfplumber(pdf_bytes)
-            method_used = "pdfplumber"
-        except Exception as e:
-            warnings.append(f"pdfplumber_failed: {str(e)}")
-
-    # If still empty => we return a clear diagnostic (no silent empties)
-    if not text:
+    # 2) Fallback pdfplumber
+    try:
+        text = extract_with_pdfplumber(pdf_bytes)
+        if text:
+            return jsonify({"ok": True, "engine": "pdfplumber", "text": text})
+        return jsonify({
+            "ok": True,
+            "engine": "none",
+            "text": "",
+            "warning": "No extractable text found (could be image-based or weird encoding).",
+            "pymupdf_error": pymupdf_err
+        })
+    except Exception as e:
         return jsonify({
             "ok": False,
-            "error": "NO_TEXT_FOUND",
-            "method_used": method_used,
-            "warnings": warnings,
-            "bytes": len(pdf_bytes),
-        }), 200  # 200 on purpose, so Make can continue and decide fallback
-
-    return jsonify({
-        "ok": True,
-        "text": text,
-        "method_used": method_used,
-        "warnings": warnings,
-        "bytes": len(pdf_bytes),
-        "chars": len(text),
-    }), 200
-
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
+            "error": str(e),
+            "pymupdf_error": pymupdf_err
+        }), 500
