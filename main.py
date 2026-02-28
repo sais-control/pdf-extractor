@@ -1,98 +1,47 @@
 from flask import Flask, request, jsonify
-import pdfplumber
-import io
 import os
+import io
+
+import fitz  # PyMuPDF
 
 app = Flask(__name__)
 
-@app.route("/", methods=["GET"])
-def health():
-    return "PDF Extractor is running"
+@app.route("/", methods=["GET", "POST"])
+def root():
+    # Healthcheck
+    if request.method == "GET":
+        return "PDF Extractor is running", 200
 
-@app.route("/extract", methods=["POST"])
-def extract_pdf():
+    # POST: Datei muss als multipart/form-data mit Feldname "file" kommen
     if "file" not in request.files:
-        return jsonify({"error": "No file provided"}), 400
+        return jsonify({"ok": False, "error": "No file part in request"}), 400
 
-    file = request.files["file"]
+    f = request.files["file"]
+    filename = (f.filename or "").lower()
 
-    if not file.filename.endswith(".pdf"):
-        return jsonify({"error": "File must be a PDF"}), 400
+    if not filename.endswith(".pdf"):
+        return jsonify({"ok": False, "error": "File must be a PDF"}), 400
 
     try:
-        pdf_bytes = file.read()
-        text = ""
+        pdf_bytes = f.read()
+        text = []
 
-        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-            for page in pdf.pages:
-                text += page.extract_text() or ""
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        for page in doc:
+            text.append(page.get_text("text"))
+
+        extracted = "\n".join(text).strip()
 
         return jsonify({
-            "success": True,
-            "text": text
-        })
+            "ok": True,
+            "text": extracted,
+            "text_len": len(extracted)
+        }), 200
 
     except Exception as e:
-        return jsonify({
-            "error": str(e)
-        }), 500
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
-import functions_framework
-import pdfplumber
-from flask import Request, jsonify
-import io
-
-
-@functions_framework.http
-def hello_http(request: Request):
-    try:
-        if request.method != "POST":
-            return jsonify({
-                "ok": False,
-                "error": "Only POST requests allowed"
-            }), 405
-
-        if "file" not in request.files:
-            return jsonify({
-                "ok": False,
-                "error": "No file part in request"
-            }), 400
-
-        file = request.files["file"]
-
-        if file.filename == "":
-            return jsonify({
-                "ok": False,
-                "error": "No selected file"
-            }), 400
-
-        if not file.filename.lower().endswith(".pdf"):
-            return jsonify({
-                "ok": False,
-                "error": "File must be a PDF"
-            }), 400
-
-        pdf_bytes = file.read()
-
-        extracted_text = ""
-
-        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-            for page in pdf.pages:
-                text = page.extract_text()
-                if text:
-                    extracted_text += text + "\n"
-
-        return jsonify({
-            "ok": True,
-            "text": extracted_text
-        })
-
-    except Exception as e:
-        return jsonify({
-            "ok": False,
-            "error": str(e)
-        }), 500
