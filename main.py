@@ -13,7 +13,8 @@ HEADER_MARKERS = [
     "beleg-nr", "belegnr", "beleg nr", "belegnummer",
     "datum", "rechnungsdatum", "belegdatum",
     "kunden-nr", "kundennr", "kunden nr", "kd-nr", "kd nr", "kundennummer",
-    "blatt", "seite", "page"
+    "blatt", "seite", "page",
+    "bei schriftwechsel bitte angeben"
 ]
 
 POSITIONS_HEADER_MARKERS = [
@@ -29,15 +30,17 @@ POSITIONS_HEADER_MARKERS = [
 
 ORDER_DELIVERY_MARKERS = [
     "lieferung", "lieferdatum", "lieferschein", "lieferschein-nr", "lieferscheinnr",
+    "lieferschein nr", "lieferscheindatum",
     "bestellnr", "bestell-nr", "bestellnummer", "bestellangaben", "bestellung",
     "auftrag", "auftragsnr", "auftrags-nr", "auftragsnummer",
-    "auftr.text", "auftr text", "auftragstext",
+    "auftr.text", "auftr text", "auftragstext", "auftrags-text", "auftrags text",
     "auftr.nr", "auftr nr",
     "kommission", "projekt", "baustelle", "kostenstelle", "standort",
     "abholer", "ausweis-nr./abholer", "ausweis-nr", "selbstabholer", "abholung",
     "per lkw", "per paket", "versandart", "lieferanschrift", "lieferadresse",
     "lieferempfänger", "lieferempfaenger", "empfänger", "empfaenger",
-    "ihr auftrag", "unser auftrag", "referenz", "referenznummer", "kundenzeichen"
+    "ihr auftrag", "unser auftrag", "referenz", "referenznummer", "kundenzeichen",
+    "vorgang entstand", "erfasst von", "online-warenkorbnr"
 ]
 
 TOTALS_MARKERS = [
@@ -77,6 +80,20 @@ PARTY_MARKERS = [
     "lieferadresse", "anschrift"
 ]
 
+NOTICE_MARKERS = [
+    "ab sofort möchten wir sie bitten",
+    "ab sofort moechten wir sie bitten",
+    "überweisungsankündigungen",
+    "ueberweisungsankuendigungen",
+    "zahlungsavis",
+    "zentrale e-mail-adresse",
+    "reibungslose zuordnung",
+    "für ihre unterstützung bedanken wir uns",
+    "fuer ihre unterstuetzung bedanken wir uns",
+]
+
+STAR_BLOCK_PATTERN = re.compile(r"^\*{5,}$")
+
 
 def normalize_line(line: str) -> str:
     line = line.replace("\xa0", " ")
@@ -91,6 +108,111 @@ def lower_clean(line: str) -> str:
 def contains_any(line: str, markers: list[str]) -> bool:
     l = lower_clean(line)
     return any(marker in l for marker in markers)
+
+
+def is_star_line(line: str) -> bool:
+    return STAR_BLOCK_PATTERN.match(normalize_line(line)) is not None
+
+
+def is_notice_line(line: str) -> bool:
+    l = lower_clean(line)
+    return contains_any(line, NOTICE_MARKERS) or "zahlungsavis" in l
+
+
+def is_header_like(line: str) -> bool:
+    l = lower_clean(line)
+    if contains_any(line, HEADER_MARKERS):
+        return True
+    if "rechn.nr" in l or "rechn nr" in l:
+        return True
+    if "kd-nr" in l or "kunden-nr" in l:
+        return True
+    return False
+
+
+def is_positions_header(line: str) -> bool:
+    l = lower_clean(line)
+
+    score = 0
+    if "artikel" in l:
+        score += 1
+    if "menge" in l:
+        score += 1
+    if "preis" in l or "e-preis" in l or "g-preis" in l:
+        score += 1
+    if "wert" in l or "betrag" in l or "pos/wert" in l:
+        score += 1
+    if "me" in l or "einh" in l or "einheit" in l:
+        score += 1
+
+    if score >= 3:
+        return True
+
+    if contains_any(line, POSITIONS_HEADER_MARKERS):
+        if any(x in l for x in ["artikel", "bezeichnung", "position", "pos."]):
+            return True
+
+    return False
+
+
+def is_positions_like(line: str) -> bool:
+    """
+    Heuristik für echte Positionszeilen / Artikelzeilen.
+    """
+    raw = normalize_line(line)
+    l = raw.lower()
+
+    if not raw:
+        return False
+
+    # Sehr typische Artikelnummer-/Artikelkennungszeile
+    if re.match(r"^[A-Z0-9][A-Z0-9\-/\.]{4,}$", raw):
+        return True
+
+    # Artikelcode am Anfang + irgendwo Zahl
+    if re.match(r"^[A-Z0-9][A-Z0-9\-/\.]{3,}", raw) and re.search(r"\d", raw):
+        return True
+
+    # Mengen-/Preis-Zeilen
+    if re.search(r"\d+,\d+\s*(m|stk|ein|pak|kg|l|qm|eim)\b", l):
+        return True
+
+    if re.search(r"\d+,\d+\s+\d+,\d+", raw):
+        return True
+
+    return False
+
+
+def should_stop_order_block(line: str) -> bool:
+    """
+    Wann endet der order_delivery_block?
+    """
+    if is_positions_header(line):
+        return True
+    if contains_any(line, TOTALS_MARKERS):
+        return True
+    if contains_any(line, PAYMENT_MARKERS):
+        return True
+    if is_star_line(line):
+        return True
+    if is_notice_line(line):
+        return True
+    return False
+
+
+def should_stop_positions_block(line: str) -> bool:
+    """
+    Wann endet der positions_block?
+    """
+    if contains_any(line, TOTALS_MARKERS):
+        return True
+    if contains_any(line, PAYMENT_MARKERS):
+        return True
+    if is_star_line(line):
+        return True
+    if is_notice_line(line):
+        return True
+    return False
 
 
 def extract_text_pymupdf(pdf_bytes: bytes):
@@ -131,34 +253,21 @@ def clean_lines(text: str) -> list[str]:
 
 def find_positions_header_index(lines: list[str]) -> int | None:
     for i, line in enumerate(lines):
-        l = lower_clean(line)
-
-        score = 0
-        if "artikel" in l:
-            score += 1
-        if "menge" in l:
-            score += 1
-        if "preis" in l or "e-preis" in l or "g-preis" in l:
-            score += 1
-        if "wert" in l or "betrag" in l or "pos/wert" in l:
-            score += 1
-        if "me" in l or "einh" in l or "einheit" in l:
-            score += 1
-
-        if score >= 3:
+        if is_positions_header(line):
             return i
-
-        if contains_any(line, POSITIONS_HEADER_MARKERS):
-            # fallback: einzelne starke Kopfzeilen
-            if any(x in l for x in ["artikel", "bezeichnung", "position", "pos."]):
-                return i
-
     return None
 
 
-def find_last_marker_index(lines: list[str], markers: list[str]) -> int | None:
-    for i in range(len(lines) - 1, -1, -1):
-        if contains_any(lines[i], markers):
+def find_first_notice_or_star_index(lines: list[str], start_idx: int) -> int | None:
+    for i in range(start_idx, len(lines)):
+        if is_star_line(lines[i]) or is_notice_line(lines[i]):
+            return i
+    return None
+
+
+def find_first_totals_or_payment_index(lines: list[str], start_idx: int) -> int | None:
+    for i in range(start_idx, len(lines)):
+        if contains_any(lines[i], TOTALS_MARKERS) or contains_any(lines[i], PAYMENT_MARKERS):
             return i
     return None
 
@@ -171,127 +280,212 @@ def find_footer_start_index(lines: list[str]) -> int | None:
 
 
 def collect_order_delivery_indices(lines: list[str], positions_header_idx: int | None) -> set[int]:
+    """
+    Sammelt explizit Liefer-/Auftrags-/Abholer-Block vor den Positionen.
+    Wichtig für Hempelmann & ähnliche Rechnungen.
+    """
     indices = set()
-    upper_limit = positions_header_idx if positions_header_idx is not None else len(lines)
+    if positions_header_idx is None:
+        return indices
 
-    i = 0
+    upper_limit = len(lines)
+    i = positions_header_idx + 1
+
     while i < upper_limit:
-        l = lower_clean(lines[i])
+        line = lines[i]
 
-        if contains_any(lines[i], ORDER_DELIVERY_MARKERS):
-            indices.add(i)
-
-            # Hempelmann-/Auftragsblock-Regel:
-            # nach Lieferung / AUFTR / Abholer / per LKW auch die Folgezeilen mitnehmen,
-            # bis klar eine Position beginnt oder ein Summenmarker auftaucht.
-            j = i + 1
+        if contains_any(line, ORDER_DELIVERY_MARKERS):
+            j = i
             while j < upper_limit:
-                next_l = lower_clean(lines[j])
+                current = lines[j]
 
-                if contains_any(lines[j], TOTALS_MARKERS) or contains_any(lines[j], PAYMENT_MARKERS):
+                if should_stop_order_block(current) and j != i:
                     break
 
-                # neue starke Tabellenkopfzeile -> stoppen
-                if contains_any(lines[j], POSITIONS_HEADER_MARKERS):
+                # stoppe, wenn echte Positionszeile beginnt und wir schon mind. 1 Folgezeile hatten
+                if j != i and is_positions_like(current):
                     break
 
-                # grobe Positionszeile: kurze Artikelkennung am Anfang + Zahlen weiter rechts
-                if re.match(r"^[A-Z0-9][A-Z0-9\-\/\.]{3,}", lines[j]) and re.search(r"\d", lines[j]):
-                    # diese Zeile gehört meist schon zu Positionen, also NICHT mehr reinziehen
-                    break
-
-                # typische Folgezeilen für Lieferung/Adresse/AUFTR.TEXT/Abholer
                 indices.add(j)
                 j += 1
 
             i = j
             continue
 
+        # wenn nach Positionskopf direkt echte Positionszeile kommt, abbrechen
+        if is_positions_like(line):
+            break
+
         i += 1
 
     return indices
 
 
-def build_blocks(lines: list[str]) -> dict:
+def split_blocks(lines: list[str]) -> dict:
     positions_header_idx = find_positions_header_index(lines)
-    totals_idx = find_last_marker_index(lines, TOTALS_MARKERS)
-    payment_idx = find_last_marker_index(lines, PAYMENT_MARKERS)
     footer_idx = find_footer_start_index(lines)
 
-    # Footer bevorzugt abtrennen, aber nicht mitten in totals/payment schneiden
-    if footer_idx is not None:
-        if totals_idx is not None and footer_idx < totals_idx:
-            footer_idx = None
-        if payment_idx is not None and footer_idx < payment_idx:
-            footer_idx = None
-
-    # Positionsheader
-    positions_header_block = ""
-    if positions_header_idx is not None:
-        positions_header_block = lines[positions_header_idx]
-
-    # Order/Delivery
     order_delivery_indices = collect_order_delivery_indices(lines, positions_header_idx)
-
-    # Header-/Party-Bereich: alles vor positions_header
-    upper_end = positions_header_idx if positions_header_idx is not None else len(lines)
-    upper_lines = lines[:upper_end]
 
     header_lines = []
     party_lines = []
     order_delivery_lines = []
+    positions_header_block = ""
+    positions_lines = []
+    notice_lines = []
+    totals_lines = []
+    payment_lines = []
+    footer_lines = []
 
-    for i, line in enumerate(upper_lines):
-        if i in order_delivery_indices:
-            order_delivery_lines.append(line)
-        elif contains_any(line, HEADER_MARKERS):
+    if positions_header_idx is None:
+        # Fallback: kein Positionskopf gefunden -> fast alles oberer Bereich
+        for line in lines:
+            if contains_any(line, FOOTER_MARKERS):
+                footer_lines.append(line)
+            elif is_header_like(line):
+                header_lines.append(line)
+            else:
+                party_lines.append(line)
+
+        return {
+            "header_block": "\n".join(header_lines).strip(),
+            "party_block": "\n".join(party_lines).strip(),
+            "order_delivery_block": "",
+            "positions_header_block": "",
+            "positions_block": "",
+            "totals_block": "",
+            "payment_block": "",
+            "footer_block": "\n".join(footer_lines).strip(),
+            "meta": {
+                "positions_header_found": False,
+                "totals_found": False,
+                "payment_found": False,
+                "footer_found": len(footer_lines) > 0
+            }
+        }
+
+    positions_header_block = lines[positions_header_idx]
+
+    # Oberer Bereich bis Positionskopf
+    upper_lines = lines[:positions_header_idx]
+
+    for idx, line in enumerate(upper_lines):
+        if is_header_like(line):
             header_lines.append(line)
+        elif contains_any(line, ORDER_DELIVERY_MARKERS):
+            order_delivery_lines.append(line)
         else:
             party_lines.append(line)
 
-    # Positionsblock
-    positions_start = positions_header_idx + 1 if positions_header_idx is not None else None
+    # Alles nach Positionskopf
+    lower_lines = lines[positions_header_idx + 1:]
 
-    # erstestes Ende bestimmen: totals oder payment oder footer
-    possible_ends = [idx for idx in [totals_idx, payment_idx, footer_idx] if idx is not None]
-    positions_end = min(possible_ends) if possible_ends else len(lines)
+    # Step 1: notice/star block finden
+    notice_start_rel = find_first_notice_or_star_index(lower_lines, 0)
+    totals_start_rel = find_first_totals_or_payment_index(lower_lines, 0)
 
-    positions_lines = []
-    if positions_start is not None and positions_start < positions_end:
-        for idx in range(positions_start, positions_end):
-            # nichts aus order_delivery in positionen übernehmen
-            if idx not in order_delivery_indices:
-                positions_lines.append(lines[idx])
+    positions_end_rel_candidates = [x for x in [notice_start_rel, totals_start_rel] if x is not None]
+    positions_end_rel = min(positions_end_rel_candidates) if positions_end_rel_candidates else len(lower_lines)
 
-    # Totalsblock
-    totals_lines = []
-    if totals_idx is not None:
-        totals_end = min([idx for idx in [payment_idx, footer_idx] if idx is not None and idx > totals_idx] or [len(lines)])
-        totals_lines = lines[totals_idx:totals_end]
+    # Positionen bis vor notice/totals/payment
+    for rel_idx in range(0, positions_end_rel):
+        abs_idx = positions_header_idx + 1 + rel_idx
+        line = lines[abs_idx]
 
-    # Paymentblock
-    payment_lines = []
-    if payment_idx is not None:
-        payment_end = min([idx for idx in [footer_idx] if idx is not None and idx > payment_idx] or [len(lines)])
-        payment_lines = lines[payment_idx:payment_end]
+        if abs_idx in order_delivery_indices:
+            order_delivery_lines.append(line)
+        else:
+            positions_lines.append(line)
 
-    # Footerblock
-    footer_lines = []
-    if footer_idx is not None:
-        footer_lines = lines[footer_idx:]
+    # Notice Block
+    notice_end_abs = None
+    if notice_start_rel is not None:
+        notice_abs = positions_header_idx + 1 + notice_start_rel
+        k = notice_abs
+        while k < len(lines):
+            if contains_any(lines[k], TOTALS_MARKERS) or contains_any(lines[k], PAYMENT_MARKERS):
+                break
+            if contains_any(lines[k], FOOTER_MARKERS):
+                break
+            notice_lines.append(lines[k])
+            k += 1
+        notice_end_abs = k
 
-    # Doppelte Zeilen aus party/header entfernen, wenn sie schon in order_delivery sind
-    order_delivery_set = set(order_delivery_lines)
-    header_lines = [x for x in header_lines if x not in order_delivery_set]
-    party_lines = [x for x in party_lines if x not in order_delivery_set]
+    # Totals / Payment / Footer ab danach
+    start_after_notice = notice_end_abs if notice_end_abs is not None else (positions_header_idx + 1 + positions_end_rel)
 
-    # Party etwas säubern: keine Footer-/Totals-/Payment-Zeilen
-    party_lines = [
-        x for x in party_lines
-        if not contains_any(x, TOTALS_MARKERS)
-        and not contains_any(x, PAYMENT_MARKERS)
-        and not contains_any(x, FOOTER_MARKERS)
-    ]
+    tail_lines = lines[start_after_notice:]
+
+    # Footer am Ende separat
+    footer_start_in_tail = None
+    for i, line in enumerate(tail_lines):
+        if contains_any(line, FOOTER_MARKERS):
+            footer_start_in_tail = i
+            break
+
+    tail_main = tail_lines[:footer_start_in_tail] if footer_start_in_tail is not None else tail_lines
+    footer_lines = tail_lines[footer_start_in_tail:] if footer_start_in_tail is not None else []
+
+    # Totals vs Payment trennen
+    for line in tail_main:
+        if contains_any(line, PAYMENT_MARKERS):
+            payment_lines.append(line)
+        elif contains_any(line, TOTALS_MARKERS):
+            totals_lines.append(line)
+        else:
+            # unklare Restzeilen nach Positionen eher Payment zuordnen
+            if line:
+                payment_lines.append(line)
+
+    # order_delivery zusätzlich aus expliziten Indizes nach Positionskopf ergänzen
+    for idx in sorted(order_delivery_indices):
+        if idx > positions_header_idx:
+            line = lines[idx]
+            if line not in order_delivery_lines:
+                order_delivery_lines.append(line)
+
+    # Aus positions_lines alles entfernen, was klar order_delivery / totals / payment / notice ist
+    cleaned_positions = []
+    for line in positions_lines:
+        if contains_any(line, ORDER_DELIVERY_MARKERS):
+            if line not in order_delivery_lines:
+                order_delivery_lines.append(line)
+            continue
+        if should_stop_positions_block(line):
+            if is_notice_line(line) or is_star_line(line):
+                notice_lines.append(line)
+            elif contains_any(line, TOTALS_MARKERS):
+                totals_lines.append(line)
+            elif contains_any(line, PAYMENT_MARKERS):
+                payment_lines.append(line)
+            continue
+        cleaned_positions.append(line)
+    positions_lines = cleaned_positions
+
+    # notice_block an payment anhängen, damit GPT ihn separat von Positionen sieht
+    if notice_lines:
+        payment_lines = notice_lines + payment_lines
+
+    # Dubletten bereinigen
+    def dedupe_keep_order(items: list[str]) -> list[str]:
+        seen = set()
+        result = []
+        for item in items:
+            key = item.strip()
+            if not key:
+                continue
+            if key not in seen:
+                seen.add(key)
+                result.append(item)
+        return result
+
+    header_lines = dedupe_keep_order(header_lines)
+    party_lines = dedupe_keep_order(party_lines)
+    order_delivery_lines = dedupe_keep_order(order_delivery_lines)
+    positions_lines = dedupe_keep_order(positions_lines)
+    totals_lines = dedupe_keep_order(totals_lines)
+    payment_lines = dedupe_keep_order(payment_lines)
+    footer_lines = dedupe_keep_order(footer_lines)
 
     return {
         "header_block": "\n".join(header_lines).strip(),
@@ -303,10 +497,10 @@ def build_blocks(lines: list[str]) -> dict:
         "payment_block": "\n".join(payment_lines).strip(),
         "footer_block": "\n".join(footer_lines).strip(),
         "meta": {
-            "positions_header_found": positions_header_idx is not None,
-            "totals_found": totals_idx is not None,
-            "payment_found": payment_idx is not None,
-            "footer_found": footer_idx is not None
+            "positions_header_found": True,
+            "totals_found": len(totals_lines) > 0,
+            "payment_found": len(payment_lines) > 0,
+            "footer_found": len(footer_lines) > 0
         }
     }
 
@@ -342,14 +536,12 @@ def extract_pdf():
         pages = []
         engine = "none"
 
-        # Hauptversuch: PyMuPDF
         try:
             text_full, pages = extract_text_pymupdf(pdf_bytes)
             engine = "pymupdf"
         except Exception as e:
             pymupdf_error = str(e)
 
-        # Fallback: pdfplumber, falls kein Text
         if not text_full.strip():
             try:
                 text_full, pages = extract_text_pdfplumber(pdf_bytes)
@@ -387,7 +579,7 @@ def extract_pdf():
             }), 200
 
         lines = clean_lines(text_full)
-        block_result = build_blocks(lines)
+        block_result = split_blocks(lines)
 
         return jsonify({
             "ok": True,
