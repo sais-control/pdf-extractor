@@ -1097,102 +1097,361 @@ def health():
 
 @app.route("/extract", methods=["POST"])
 def extract_pdf():
-    if "file" not in request.files:
-        return jsonify({"ok": False, "error": "No file provided"}), 400
-
-    file = request.files["file"]
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
-        return jsonify({"ok": False, "error": "File must be a PDF"}), 400
-
-    known_betrieb_name = request.form.get("known_betrieb_name", "").strip() or None
-    pdf_bytes = file.read()
-
-    text_full = ""
-    pages: List[Dict[str, Any]] = []
-    text_engine = "none"
-    ocr_used = False
-
-    pymupdf_error = None
-    pdfplumber_error = None
-    ocr_error = None
-
-    # 1) PyMuPDF
     try:
-        text_full, pages = extract_text_pymupdf(pdf_bytes)
-        text_engine = "pymupdf"
+        if "file" not in request.files:
+            return jsonify({
+                "ok": False,
+                "error": "no_file_provided",
+                "error_detail": "No file provided",
+                "meta": {
+                    "extractor": "cloudrun-v4.2-structure",
+                    "text_engine": "none",
+                    "ocr_used": False,
+                    "page_count": 0,
+                    "chars": 0,
+                },
+                "hints": {
+                    "document_type_hint": "sonstiges",
+                    "supplier_hint": None,
+                    "known_betrieb_name": None,
+                    "known_betrieb_match": False,
+                },
+                "quality": {
+                    "score": 0.0,
+                    "usable": False,
+                    "reasons": ["NO_FILE_PROVIDED"]
+                },
+                "structure": {
+                    "kopf_block_lines": [],
+                    "adress_block_lines": [],
+                    "auftrag_kommission_block_lines": [],
+                    "positionskopf_block_lines": [],
+                    "positionsgruppen": [],
+                    "summenblock_lines": [],
+                    "zahlungsblock_lines": [],
+                    "footer_block_lines": [],
+                    "fallback": {
+                        "fallback_before_positions": [],
+                        "fallback_inside_positions": [],
+                        "fallback_after_totals": [],
+                        "fallback_global": [],
+                    },
+                    "structure_warnings": ["EXTRACT_FAILED"],
+                    "header_row_groups": [],
+                },
+                "blocks": {
+                    "kopf_block": "",
+                    "adress_block": "",
+                    "auftrag_kommission_block": "",
+                    "positionskopf_block": "",
+                    "positionsblock": "",
+                    "summenblock": "",
+                    "zahlungsblock": "",
+                    "footer_block": "",
+                },
+                "pages": [],
+                "text_full": "",
+                "debug": {
+                    "pymupdf_error": None,
+                    "pdfplumber_error": None,
+                    "ocr_error": None,
+                }
+            }), 200
+
+        file = request.files["file"]
+
+        if not file.filename or not file.filename.lower().endswith(".pdf"):
+            return jsonify({
+                "ok": False,
+                "error": "invalid_file_type",
+                "error_detail": "File must be a PDF",
+                "meta": {
+                    "extractor": "cloudrun-v4.2-structure",
+                    "text_engine": "none",
+                    "ocr_used": False,
+                    "page_count": 0,
+                    "chars": 0,
+                },
+                "hints": {
+                    "document_type_hint": "sonstiges",
+                    "supplier_hint": None,
+                    "known_betrieb_name": None,
+                    "known_betrieb_match": False,
+                },
+                "quality": {
+                    "score": 0.0,
+                    "usable": False,
+                    "reasons": ["INVALID_FILE_TYPE"]
+                },
+                "structure": {
+                    "kopf_block_lines": [],
+                    "adress_block_lines": [],
+                    "auftrag_kommission_block_lines": [],
+                    "positionskopf_block_lines": [],
+                    "positionsgruppen": [],
+                    "summenblock_lines": [],
+                    "zahlungsblock_lines": [],
+                    "footer_block_lines": [],
+                    "fallback": {
+                        "fallback_before_positions": [],
+                        "fallback_inside_positions": [],
+                        "fallback_after_totals": [],
+                        "fallback_global": [],
+                    },
+                    "structure_warnings": ["EXTRACT_FAILED"],
+                    "header_row_groups": [],
+                },
+                "blocks": {
+                    "kopf_block": "",
+                    "adress_block": "",
+                    "auftrag_kommission_block": "",
+                    "positionskopf_block": "",
+                    "positionsblock": "",
+                    "summenblock": "",
+                    "zahlungsblock": "",
+                    "footer_block": "",
+                },
+                "pages": [],
+                "text_full": "",
+                "debug": {
+                    "pymupdf_error": None,
+                    "pdfplumber_error": None,
+                    "ocr_error": None,
+                }
+            }), 200
+
+        known_betrieb_name = request.form.get("known_betrieb_name", "").strip() or None
+        pdf_bytes = file.read()
+
+        text_full = ""
+        pages: List[Dict[str, Any]] = []
+        text_engine = "none"
+        ocr_used = False
+
+        pymupdf_error = None
+        pdfplumber_error = None
+        ocr_error = None
+
+        # 1) PyMuPDF
+        try:
+            text_full, pages = extract_text_pymupdf(pdf_bytes)
+            text_engine = "pymupdf"
+        except Exception as e:
+            pymupdf_error = str(e)
+
+        # 2) pdfplumber
+        if text_looks_bad(text_full):
+            try:
+                text_pp, pages_pp = extract_text_pdfplumber(pdf_bytes)
+                if len(norm(text_pp)) > len(norm(text_full)):
+                    text_full, pages = text_pp, pages_pp
+                    text_engine = "pdfplumber"
+                if text_looks_bad(text_full):
+                    raise ValueError("pdfplumber text still weak")
+            except Exception as e:
+                pdfplumber_error = str(e)
+
+        # 3) OCR Best-Variant
+        if text_looks_bad(text_full):
+            try:
+                text_ocr, pages_ocr = extract_text_ocr_best(pdf_bytes)
+                if len(norm(text_ocr)) > len(norm(text_full)):
+                    text_full, pages = text_ocr, pages_ocr
+                    text_engine = "ocr_tesseract_best"
+                    ocr_used = True
+            except Exception as e:
+                ocr_error = str(e)
+
+        if not norm(text_full):
+            return jsonify({
+                "ok": False,
+                "error": "no_usable_text_extracted",
+                "error_detail": "No usable text could be extracted",
+                "meta": {
+                    "extractor": "cloudrun-v4.2-structure",
+                    "text_engine": text_engine,
+                    "ocr_used": ocr_used,
+                    "page_count": len(pages),
+                    "chars": len(text_full),
+                },
+                "hints": {
+                    "document_type_hint": "sonstiges",
+                    "supplier_hint": None,
+                    "known_betrieb_name": known_betrieb_name,
+                    "known_betrieb_match": False,
+                },
+                "quality": {
+                    "score": 0.0,
+                    "usable": False,
+                    "reasons": ["NO_USABLE_TEXT_EXTRACTED"]
+                },
+                "structure": {
+                    "kopf_block_lines": [],
+                    "adress_block_lines": [],
+                    "auftrag_kommission_block_lines": [],
+                    "positionskopf_block_lines": [],
+                    "positionsgruppen": [],
+                    "summenblock_lines": [],
+                    "zahlungsblock_lines": [],
+                    "footer_block_lines": [],
+                    "fallback": {
+                        "fallback_before_positions": [],
+                        "fallback_inside_positions": [],
+                        "fallback_after_totals": [],
+                        "fallback_global": [],
+                    },
+                    "structure_warnings": ["NO_USABLE_TEXT_EXTRACTED"],
+                    "header_row_groups": [],
+                },
+                "blocks": {
+                    "kopf_block": "",
+                    "adress_block": "",
+                    "auftrag_kommission_block": "",
+                    "positionskopf_block": "",
+                    "positionsblock": "",
+                    "summenblock": "",
+                    "zahlungsblock": "",
+                    "footer_block": "",
+                },
+                "pages": pages,
+                "text_full": text_full,
+                "debug": {
+                    "pymupdf_error": pymupdf_error,
+                    "pdfplumber_error": pdfplumber_error,
+                    "ocr_error": ocr_error,
+                }
+            }), 200
+
+        try:
+            result = build_output(
+                text_full=text_full,
+                pages=pages,
+                text_engine=text_engine,
+                ocr_used=ocr_used,
+                known_betrieb_name=known_betrieb_name,
+                pymupdf_error=pymupdf_error,
+                pdfplumber_error=pdfplumber_error,
+                ocr_error=ocr_error,
+            )
+            return jsonify(result), 200
+
+        except Exception as e:
+            return jsonify({
+                "ok": False,
+                "error": "parse_failed",
+                "error_detail": str(e),
+                "meta": {
+                    "extractor": "cloudrun-v4.2-structure",
+                    "text_engine": text_engine,
+                    "ocr_used": ocr_used,
+                    "page_count": len(pages),
+                    "chars": len(text_full),
+                },
+                "hints": {
+                    "document_type_hint": "sonstiges",
+                    "supplier_hint": None,
+                    "known_betrieb_name": known_betrieb_name,
+                    "known_betrieb_match": False,
+                },
+                "quality": {
+                    "score": 0.0,
+                    "usable": False,
+                    "reasons": ["PARSE_FAILED"]
+                },
+                "structure": {
+                    "kopf_block_lines": [],
+                    "adress_block_lines": [],
+                    "auftrag_kommission_block_lines": [],
+                    "positionskopf_block_lines": [],
+                    "positionsgruppen": [],
+                    "summenblock_lines": [],
+                    "zahlungsblock_lines": [],
+                    "footer_block_lines": [],
+                    "fallback": {
+                        "fallback_before_positions": [],
+                        "fallback_inside_positions": [],
+                        "fallback_after_totals": [],
+                        "fallback_global": [],
+                    },
+                    "structure_warnings": ["PARSE_FAILED"],
+                    "header_row_groups": [],
+                },
+                "blocks": {
+                    "kopf_block": "",
+                    "adress_block": "",
+                    "auftrag_kommission_block": "",
+                    "positionskopf_block": "",
+                    "positionsblock": "",
+                    "summenblock": "",
+                    "zahlungsblock": "",
+                    "footer_block": "",
+                },
+                "pages": pages,
+                "text_full": text_full,
+                "debug": {
+                    "pymupdf_error": pymupdf_error,
+                    "pdfplumber_error": pdfplumber_error,
+                    "ocr_error": ocr_error,
+                }
+            }), 200
+
     except Exception as e:
-        pymupdf_error = str(e)
-
-    # 2) pdfplumber
-    if text_looks_bad(text_full):
-        try:
-            text_pp, pages_pp = extract_text_pdfplumber(pdf_bytes)
-            if len(norm(text_pp)) > len(norm(text_full)):
-                text_full, pages = text_pp, pages_pp
-                text_engine = "pdfplumber"
-            if text_looks_bad(text_full):
-                raise ValueError("pdfplumber text still weak")
-        except Exception as e:
-            pdfplumber_error = str(e)
-
-    # 3) OCR Best-Variant
-    if text_looks_bad(text_full):
-        try:
-            text_ocr, pages_ocr = extract_text_ocr_best(pdf_bytes)
-            if len(norm(text_ocr)) > len(norm(text_full)):
-                text_full, pages = text_ocr, pages_ocr
-                text_engine = "ocr_tesseract_best"
-                ocr_used = True
-        except Exception as e:
-            ocr_error = str(e)
-
-    if not norm(text_full):
         return jsonify({
             "ok": False,
-            "error": "no_usable_text_extracted",
-            "meta": {
-                "text_engine": text_engine,
-                "ocr_used": ocr_used,
-                "page_count": len(pages),
-                "chars": len(text_full),
-            },
-            "debug": {
-                "pymupdf_error": pymupdf_error,
-                "pdfplumber_error": pdfplumber_error,
-                "ocr_error": ocr_error,
-            }
-        }), 200
-
-    try:
-        result = build_output(
-            text_full=text_full,
-            pages=pages,
-            text_engine=text_engine,
-            ocr_used=ocr_used,
-            known_betrieb_name=known_betrieb_name,
-            pymupdf_error=pymupdf_error,
-            pdfplumber_error=pdfplumber_error,
-            ocr_error=ocr_error,
-        )
-        return jsonify(result), 200
-
-    except Exception as e:
-        return jsonify({
-            "ok": False,
-            "error": "parse_failed",
+            "error": "extract_failed",
             "error_detail": str(e),
             "meta": {
-                "text_engine": text_engine,
-                "ocr_used": ocr_used,
-                "page_count": len(pages),
-                "chars": len(text_full),
+                "extractor": "cloudrun-v4.2-structure",
+                "text_engine": "none",
+                "ocr_used": False,
+                "page_count": 0,
+                "chars": 0,
             },
-            "text_full": text_full,
-            "pages": pages,
+            "hints": {
+                "document_type_hint": "sonstiges",
+                "supplier_hint": None,
+                "known_betrieb_name": None,
+                "known_betrieb_match": False,
+            },
+            "quality": {
+                "score": 0.0,
+                "usable": False,
+                "reasons": ["EXTRACT_FAILED"]
+            },
+            "structure": {
+                "kopf_block_lines": [],
+                "adress_block_lines": [],
+                "auftrag_kommission_block_lines": [],
+                "positionskopf_block_lines": [],
+                "positionsgruppen": [],
+                "summenblock_lines": [],
+                "zahlungsblock_lines": [],
+                "footer_block_lines": [],
+                "fallback": {
+                    "fallback_before_positions": [],
+                    "fallback_inside_positions": [],
+                    "fallback_after_totals": [],
+                    "fallback_global": [],
+                },
+                "structure_warnings": ["EXTRACT_FAILED"],
+                "header_row_groups": [],
+            },
+            "blocks": {
+                "kopf_block": "",
+                "adress_block": "",
+                "auftrag_kommission_block": "",
+                "positionskopf_block": "",
+                "positionsblock": "",
+                "summenblock": "",
+                "zahlungsblock": "",
+                "footer_block": "",
+            },
+            "pages": [],
+            "text_full": "",
             "debug": {
-                "pymupdf_error": pymupdf_error,
-                "pdfplumber_error": pdfplumber_error,
-                "ocr_error": ocr_error,
+                "pymupdf_error": None,
+                "pdfplumber_error": None,
+                "ocr_error": None,
             }
         }), 200
 
