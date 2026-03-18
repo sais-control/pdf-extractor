@@ -6,7 +6,7 @@ from PIL import Image, ImageOps, ImageFilter
 import io
 import os
 import re
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 app = Flask(__name__)
 
@@ -25,7 +25,7 @@ def lower(text: str) -> str:
 
 def split_lines(text: str) -> List[str]:
     out = []
-    for line in text.splitlines():
+    for line in (text or "").splitlines():
         n = norm(line)
         if n:
             out.append(n)
@@ -187,6 +187,7 @@ ORDER_HINTS = [
     "fuer folgende adresse",
     "ausgeführt bei",
     "ausgefuehrt bei",
+    "betrifft baustelle",
 ]
 
 POSITIONS_HEADER_HINTS = [
@@ -214,6 +215,7 @@ POSITIONS_HEADER_HINTS = [
     "nettopreis",
     "bruttopreis",
     "material",
+    "art der leistung",
 ]
 
 TOTAL_HINTS = [
@@ -241,6 +243,8 @@ TOTAL_HINTS = [
     "bruttobetrag",
     "zahlbetrag",
     "saldo",
+    "gesamt ",
+    "gesamtbetrag",
 ]
 
 PAYMENT_HINTS = [
@@ -272,6 +276,7 @@ PAYMENT_HINTS = [
     "wird zum",
     "wird von ihrem konto",
     "der betrag wird",
+    "rechnungsbetrag bitte",
 ]
 
 FOOTER_HINTS = [
@@ -345,6 +350,12 @@ SUPPLIER_HINTS = {
         "bernhard dittmar",
         "dittmar-volkmarsen.de",
     ],
+    "kowalski_service": [
+        "kowalski-service",
+        "garten und landschaftsbau",
+        "hausmeister service",
+        "trockenbau und innenausbau",
+    ],
 }
 
 STAR_LINE_RE = re.compile(r"^\*{5,}$")
@@ -371,7 +382,7 @@ def has_date(line: str) -> bool:
     return bool(DATE_RE.search(line))
 
 def looks_like_footer_line(line: str) -> bool:
-    return contains_any(line, FOOTER_HINTS) or bool(IBAN_RE.search(line))
+    return contains_any(line, FOOTER_HINTS) or bool(IBAN_RE.search(line)) or bool(EMAIL_RE.search(line))
 
 def looks_like_total_line(line: str) -> bool:
     return contains_any(line, TOTAL_HINTS) and (has_amount(line) or "%" in line)
@@ -395,7 +406,7 @@ def looks_like_address_line(line: str) -> bool:
 
 def looks_like_name_line(line: str) -> bool:
     toks = tokenize(line)
-    if 1 <= len(toks) <= 4:
+    if 1 <= len(toks) <= 5:
         alpha = [t for t in toks if re.search(r"[A-Za-zÄÖÜäöüß]", t)]
         if alpha and all(t[0].isupper() for t in alpha if t[0].isalpha()):
             if not looks_like_header_line(line) and not looks_like_order_line(line):
@@ -409,7 +420,7 @@ def is_single_letter_spaced_title(line: str) -> bool:
 def looks_like_positions_header(line: str) -> bool:
     l = lower(line)
     score = sum(1 for h in POSITIONS_HEADER_HINTS if h in l)
-    return score >= 3
+    return score >= 2
 
 def detect_supplier_hint(text_full: str) -> Optional[str]:
     l = lower(text_full)
@@ -422,11 +433,58 @@ def detect_supplier_hint(text_full: str) -> Optional[str]:
 # OCR / EXTRACTION
 # ============================================================
 
-def preprocess_image_for_ocr(img: Image.Image) -> Image.Image:
-    img = img.convert("L")
-    img = ImageOps.autocontrast(img)
-    img = img.filter(ImageFilter.SHARPEN)
-    return img
+def pil_to_bytes(img: Image.Image) -> bytes:
+    bio = io.BytesIO()
+    img.save(bio, format="PNG")
+    return bio.getvalue()
+
+def score_ocr_text(text: str) -> int:
+    t = norm(text)
+    if not t:
+        return 0
+
+    score = 0
+    score += min(len(t), 4000) // 10
+    score += len(DATE_RE.findall(t)) * 25
+    score += len(AMOUNT_RE.findall(t)) * 15
+    score += t.lower().count("rechnung") * 40
+    score += t.lower().count("gutschrift") * 40
+    score += t.lower().count("betrag") * 10
+    score += t.lower().count("gesamt") * 10
+    score += t.lower().count("mwst") * 10
+    score += t.lower().count("kommission") * 10
+
+    lines = split_lines(t)
+    score += min(len(lines), 120)
+
+    return score
+
+def preprocess_image_variants_for_ocr(img: Image.Image) -> List[Tuple[str, Image.Image]]:
+    base = img.convert("L")
+    base = ImageOps.exif_transpose(base)
+
+    variants = []
+
+    v1 = ImageOps.autocontrast(base)
+    variants.append(("gray_autocontrast", v1))
+
+    v2 = ImageOps.autocontrast(base).filter(ImageFilter.SHARPEN)
+    variants.append(("gray_sharpen", v2))
+
+    v3 = ImageOps.autocontrast(base)
+    v3 = v3.point(lambda x: 255 if x > 180 else 0)
+    variants.append(("threshold_180", v3))
+
+    v4 = ImageOps.autocontrast(base)
+    v4 = v4.point(lambda x: 255 if x > 160 else 0)
+    variants.append(("threshold_160", v4))
+
+    # leichte Schräglagen-Fallbacks
+    for angle in (-1.5, -1.0, 1.0, 1.5):
+        vr = ImageOps.autocontrast(base).rotate(angle, expand=True, fillcolor=255)
+        variants.append((f"rot_{angle}", vr))
+
+    return variants
 
 def extract_text_pymupdf(pdf_bytes: bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
@@ -444,15 +502,38 @@ def extract_text_pdfplumber(pdf_bytes: bytes):
             pages.append({"page": i + 1, "text": text})
     return "\n".join(p["text"] for p in pages), pages
 
-def extract_text_ocr(pdf_bytes: bytes):
+def extract_text_ocr_best(pdf_bytes: bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     pages = []
+
     for i, page in enumerate(doc):
         pix = page.get_pixmap(matrix=fitz.Matrix(2.2, 2.2), alpha=False)
-        img = Image.open(io.BytesIO(pix.tobytes("png")))
-        img = preprocess_image_for_ocr(img)
-        text = pytesseract.image_to_string(img, lang="deu") or ""
-        pages.append({"page": i + 1, "text": text})
+        original_img = Image.open(io.BytesIO(pix.tobytes("png")))
+
+        best_text = ""
+        best_score = -1
+        best_variant_name = ""
+
+        variants = preprocess_image_variants_for_ocr(original_img)
+
+        for variant_name, img_variant in variants:
+            try:
+                text = pytesseract.image_to_string(img_variant, lang="deu") or ""
+                score = score_ocr_text(text)
+                if score > best_score:
+                    best_score = score
+                    best_text = text
+                    best_variant_name = variant_name
+            except Exception:
+                continue
+
+        pages.append({
+            "page": i + 1,
+            "text": best_text,
+            "ocr_variant": best_variant_name,
+            "ocr_score": best_score,
+        })
+
     return "\n".join(p["text"] for p in pages), pages
 
 def text_looks_bad(text: str) -> bool:
@@ -556,9 +637,47 @@ def line_has_price_value_pair(line: str) -> bool:
 def is_code_like(line: str) -> bool:
     return bool(re.fullmatch(r"[A-Z0-9][A-Z0-9\-\.\/]{3,}", norm(line)))
 
+def has_trailing_amount(line: str) -> bool:
+    return bool(re.search(r"-?\d{1,3}(?:\.\d{3})*,\d{2}\s*€?$", norm(line)))
+
+def looks_like_service_description(line: str) -> bool:
+    l = lower(line)
+
+    if not norm(line):
+        return False
+    if looks_like_total_line(line) or looks_like_payment_line(line) or looks_like_footer_line(line):
+        return False
+    if is_star_line(line):
+        return False
+    if is_code_like(line):
+        return False
+    if len(tokenize(line)) < 2:
+        return False
+    if re.fullmatch(r"-?\d{1,3}(?:\.\d{3})*,\d{2}\s*€?", norm(line)):
+        return False
+
+    if any(x in l for x in [
+        "fundament",
+        "material",
+        "entsorgung",
+        "montage",
+        "demontage",
+        "arbeiten",
+        "reparatur",
+        "wartung",
+        "service",
+        "baustelle",
+        "leistung",
+        "bauen",
+    ]):
+        return True
+
+    alpha_words = [t for t in tokenize(line) if re.search(r"[A-Za-zÄÖÜäöüß]", t)]
+    return len(alpha_words) >= 2
+
 def lookahead_has_position_evidence(lines: List[str], idx: int, window: int = 4) -> bool:
     for j in range(idx, min(len(lines), idx + window)):
-        if line_has_qty_unit(lines[j]) or line_has_price_value_pair(lines[j]):
+        if line_has_qty_unit(lines[j]) or line_has_price_value_pair(lines[j]) or has_amount(lines[j]):
             return True
     return False
 
@@ -586,33 +705,76 @@ def is_probable_position_start(lines: List[str], idx: int) -> bool:
     if len(toks) >= 5 and toks[0].isdigit() and has_amount(line):
         return True
 
+    # freie Leistungszeile mit späterem Betrag
+    if looks_like_service_description(line) and lookahead_has_position_evidence(lines, idx + 1, 3):
+        return True
+
     return False
 
 def split_position_groups(position_lines: List[str]) -> List[List[str]]:
-    groups: List[List[str]] = []
-    current: List[str] = []
+    cleaned = []
 
-    for i, line in enumerate(position_lines):
+    for line in position_lines:
         l = lower(line)
 
+        if not norm(line):
+            continue
         if "übertrag" in l or "uebertrag" in l:
             continue
         if looks_like_total_line(line) or looks_like_payment_line(line):
             continue
+        if looks_like_footer_line(line):
+            continue
         if is_star_line(line):
             continue
 
-        if is_probable_position_start(position_lines, i):
-            if current:
-                groups.append(current)
-            current = [line]
-        else:
-            if current:
-                current.append(line)
+        cleaned.append(line)
+
+    if not cleaned:
+        return []
+
+    # --------------------------------------------------------
+    # MODUS 1: klassische Artikel-/Materialrechnung
+    # --------------------------------------------------------
+    normal_starts = any(is_probable_position_start(cleaned, i) for i in range(len(cleaned)))
+
+    if normal_starts:
+        groups: List[List[str]] = []
+        current: List[str] = []
+
+        for i, line in enumerate(cleaned):
+            if is_probable_position_start(cleaned, i):
+                if current:
+                    groups.append(current)
+                current = [line]
+            else:
+                if current:
+                    current.append(line)
+                else:
+                    current = [line]
+
+        if current:
+            groups.append(current)
+
+        return groups
+
+    # --------------------------------------------------------
+    # MODUS 2: freie Leistungs-/Handwerkerrechnung / GP-only
+    # --------------------------------------------------------
+    groups: List[List[str]] = []
+    current: List[str] = []
+
+    for line in cleaned:
+        current.append(line)
+
+        if has_amount(line) or has_trailing_amount(line):
+            groups.append(current)
+            current = []
 
     if current:
         groups.append(current)
 
+    groups = [g for g in groups if any(norm(x) for x in g)]
     return groups
 
 # ============================================================
@@ -738,7 +900,7 @@ def build_structure(lines: List[str], supplier_hint: Optional[str]) -> Dict[str,
                 else:
                     zahlungsblock_lines.append(line)
 
-    if supplier_hint == "hempelmann_gc":
+    if supplier_hint in ("hempelmann_gc", "richter_frenzel", "weinmann_schanz", "kowalski_service"):
         cleaned_positions = []
         for line in positions_lines:
             if looks_like_order_line(line) or looks_like_name_line(line) or looks_like_address_line(line):
@@ -752,6 +914,7 @@ def build_structure(lines: List[str], supplier_hint: Optional[str]) -> Dict[str,
 
     position_groups = []
     used_lines = set()
+
     for idx, group_lines in enumerate(position_groups_raw, start=1):
         for gl in group_lines:
             used_lines.add(gl)
@@ -777,7 +940,7 @@ def build_structure(lines: List[str], supplier_hint: Optional[str]) -> Dict[str,
         structure_warnings.append("TOTALS_WEAK")
     if not auftrag_kommission_block_lines:
         structure_warnings.append("ORDER_BLOCK_WEAK")
-    if fallback_before_positions or fallback_inside_positions or fallback_after_totals:
+    if fallback_before_positions or fallback_inside_positions or fallback_after_totals or fallback_global:
         structure_warnings.append("FALLBACK_LINES_PRESENT")
 
     return {
@@ -855,14 +1018,16 @@ def compute_structure_quality(structure: Dict[str, Any], text_full: str, ocr_use
 # OUTPUT
 # ============================================================
 
-def build_output(text_full: str,
-                 pages: List[Dict[str, Any]],
-                 text_engine: str,
-                 ocr_used: bool,
-                 known_betrieb_name: Optional[str],
-                 pymupdf_error=None,
-                 pdfplumber_error=None,
-                 ocr_error=None) -> Dict[str, Any]:
+def build_output(
+    text_full: str,
+    pages: List[Dict[str, Any]],
+    text_engine: str,
+    ocr_used: bool,
+    known_betrieb_name: Optional[str],
+    pymupdf_error=None,
+    pdfplumber_error=None,
+    ocr_error=None
+) -> Dict[str, Any]:
 
     lines = split_lines(text_full)
     supplier_hint = detect_supplier_hint(text_full)
@@ -895,7 +1060,7 @@ def build_output(text_full: str,
     return {
         "ok": True,
         "meta": {
-            "extractor": "cloudrun-v4.1-structure",
+            "extractor": "cloudrun-v4.2-structure",
             "text_engine": text_engine,
             "ocr_used": ocr_used,
             "page_count": len(pages),
@@ -928,7 +1093,7 @@ def build_output(text_full: str,
 
 @app.route("/", methods=["GET"])
 def health():
-    return "PDF Extractor v4.1 structure-first is running", 200
+    return "PDF Extractor v4.2 structure-first is running", 200
 
 @app.route("/extract", methods=["POST"])
 def extract_pdf():
@@ -940,7 +1105,6 @@ def extract_pdf():
         return jsonify({"ok": False, "error": "File must be a PDF"}), 400
 
     known_betrieb_name = request.form.get("known_betrieb_name", "").strip() or None
-
     pdf_bytes = file.read()
 
     text_full = ""
@@ -952,27 +1116,32 @@ def extract_pdf():
     pdfplumber_error = None
     ocr_error = None
 
+    # 1) PyMuPDF
     try:
         text_full, pages = extract_text_pymupdf(pdf_bytes)
         text_engine = "pymupdf"
     except Exception as e:
         pymupdf_error = str(e)
 
+    # 2) pdfplumber
     if text_looks_bad(text_full):
         try:
             text_pp, pages_pp = extract_text_pdfplumber(pdf_bytes)
             if len(norm(text_pp)) > len(norm(text_full)):
                 text_full, pages = text_pp, pages_pp
                 text_engine = "pdfplumber"
+            if text_looks_bad(text_full):
+                raise ValueError("pdfplumber text still weak")
         except Exception as e:
             pdfplumber_error = str(e)
 
+    # 3) OCR Best-Variant
     if text_looks_bad(text_full):
         try:
-            text_ocr, pages_ocr = extract_text_ocr(pdf_bytes)
+            text_ocr, pages_ocr = extract_text_ocr_best(pdf_bytes)
             if len(norm(text_ocr)) > len(norm(text_full)):
                 text_full, pages = text_ocr, pages_ocr
-                text_engine = "ocr_tesseract"
+                text_engine = "ocr_tesseract_best"
                 ocr_used = True
         except Exception as e:
             ocr_error = str(e)
@@ -980,7 +1149,13 @@ def extract_pdf():
     if not norm(text_full):
         return jsonify({
             "ok": False,
-            "error": "No usable text extracted",
+            "error": "no_usable_text_extracted",
+            "meta": {
+                "text_engine": text_engine,
+                "ocr_used": ocr_used,
+                "page_count": len(pages),
+                "chars": len(text_full),
+            },
             "debug": {
                 "pymupdf_error": pymupdf_error,
                 "pdfplumber_error": pdfplumber_error,
@@ -988,18 +1163,38 @@ def extract_pdf():
             }
         }), 200
 
-    result = build_output(
-        text_full=text_full,
-        pages=pages,
-        text_engine=text_engine,
-        ocr_used=ocr_used,
-        known_betrieb_name=known_betrieb_name,
-        pymupdf_error=pymupdf_error,
-        pdfplumber_error=pdfplumber_error,
-        ocr_error=ocr_error,
-    )
+    try:
+        result = build_output(
+            text_full=text_full,
+            pages=pages,
+            text_engine=text_engine,
+            ocr_used=ocr_used,
+            known_betrieb_name=known_betrieb_name,
+            pymupdf_error=pymupdf_error,
+            pdfplumber_error=pdfplumber_error,
+            ocr_error=ocr_error,
+        )
+        return jsonify(result), 200
 
-    return jsonify(result), 200
+    except Exception as e:
+        return jsonify({
+            "ok": False,
+            "error": "parse_failed",
+            "error_detail": str(e),
+            "meta": {
+                "text_engine": text_engine,
+                "ocr_used": ocr_used,
+                "page_count": len(pages),
+                "chars": len(text_full),
+            },
+            "text_full": text_full,
+            "pages": pages,
+            "debug": {
+                "pymupdf_error": pymupdf_error,
+                "pdfplumber_error": pdfplumber_error,
+                "ocr_error": ocr_error,
+            }
+        }), 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
