@@ -475,15 +475,6 @@ def preprocess_image_variants_for_ocr(img: Image.Image) -> List[Tuple[str, Image
     v3 = v3.point(lambda x: 255 if x > 180 else 0)
     variants.append(("threshold_180", v3))
 
-    v4 = ImageOps.autocontrast(base)
-    v4 = v4.point(lambda x: 255 if x > 160 else 0)
-    variants.append(("threshold_160", v4))
-
-    # leichte Schräglagen-Fallbacks
-    for angle in (-1.5, -1.0, 1.0, 1.5):
-        vr = ImageOps.autocontrast(base).rotate(angle, expand=True, fillcolor=255)
-        variants.append((f"rot_{angle}", vr))
-
     return variants
 
 def extract_text_pymupdf(pdf_bytes: bytes):
@@ -507,7 +498,7 @@ def extract_text_ocr_best(pdf_bytes: bytes):
     pages = []
 
     for i, page in enumerate(doc):
-        pix = page.get_pixmap(matrix=fitz.Matrix(2.2, 2.2), alpha=False)
+        pix = page.get_pixmap(matrix=fitz.Matrix(1.8, 1.8), alpha=False)
         original_img = Image.open(io.BytesIO(pix.tobytes("png")))
 
         best_text = ""
@@ -518,12 +509,19 @@ def extract_text_ocr_best(pdf_bytes: bytes):
 
         for variant_name, img_variant in variants:
             try:
-                text = pytesseract.image_to_string(img_variant, lang="deu") or ""
+                text = pytesseract.image_to_string(
+                    img_variant,
+                    lang="deu",
+                    timeout=8
+                ) or ""
                 score = score_ocr_text(text)
                 if score > best_score:
                     best_score = score
                     best_text = text
                     best_variant_name = variant_name
+
+            except RuntimeError:
+                continue
             except Exception:
                 continue
 
@@ -1060,7 +1058,7 @@ def build_output(
     return {
         "ok": True,
         "meta": {
-            "extractor": "cloudrun-v4.2-structure",
+            "extractor": "cloudrun-v4.3-structure",
             "text_engine": text_engine,
             "ocr_used": ocr_used,
             "page_count": len(pages),
@@ -1093,7 +1091,7 @@ def build_output(
 
 @app.route("/", methods=["GET"])
 def health():
-    return "PDF Extractor v4.2 structure-first is running", 200
+    return "PDF Extractor v4.3 structure-first is running", 200
 
 @app.route("/extract", methods=["POST"])
 def extract_pdf():
@@ -1104,7 +1102,7 @@ def extract_pdf():
                 "error": "no_file_provided",
                 "error_detail": "No file provided",
                 "meta": {
-                    "extractor": "cloudrun-v4.2-structure",
+                    "extractor": "cloudrun-v4.3-structure",
                     "text_engine": "none",
                     "ocr_used": False,
                     "page_count": 0,
@@ -1166,7 +1164,7 @@ def extract_pdf():
                 "error": "invalid_file_type",
                 "error_detail": "File must be a PDF",
                 "meta": {
-                    "extractor": "cloudrun-v4.2-structure",
+                    "extractor": "cloudrun-v4.3-structure",
                     "text_engine": "none",
                     "ocr_used": False,
                     "page_count": 0,
@@ -1251,16 +1249,16 @@ def extract_pdf():
             except Exception as e:
                 pdfplumber_error = str(e)
 
-        # 3) OCR Best-Variant
+               # 3) OCR Best-Variant
         if text_looks_bad(text_full):
             try:
                 text_ocr, pages_ocr = extract_text_ocr_best(pdf_bytes)
-                if len(norm(text_ocr)) > len(norm(text_full)):
+                if norm(text_ocr) and len(norm(text_ocr)) > len(norm(text_full)):
                     text_full, pages = text_ocr, pages_ocr
                     text_engine = "ocr_tesseract_best"
                     ocr_used = True
-            except Exception as e:
-                ocr_error = str(e)
+            except BaseException as e:
+                ocr_error = f"OCR_FAILED: {str(e)}"
 
         if not norm(text_full):
             return jsonify({
@@ -1268,7 +1266,7 @@ def extract_pdf():
                 "error": "no_usable_text_extracted",
                 "error_detail": "No usable text could be extracted",
                 "meta": {
-                    "extractor": "cloudrun-v4.2-structure",
+                    "extractor": "cloudrun-v4.3-structure",
                     "text_engine": text_engine,
                     "ocr_used": ocr_used,
                     "page_count": len(pages),
@@ -1341,7 +1339,7 @@ def extract_pdf():
                 "error": "parse_failed",
                 "error_detail": str(e),
                 "meta": {
-                    "extractor": "cloudrun-v4.2-structure",
+                    "extractor": "cloudrun-v4.3-structure",
                     "text_engine": text_engine,
                     "ocr_used": ocr_used,
                     "page_count": len(pages),
@@ -1401,7 +1399,7 @@ def extract_pdf():
             "error": "extract_failed",
             "error_detail": str(e),
             "meta": {
-                "extractor": "cloudrun-v4.2-structure",
+                "extractor": "cloudrun-v4.3-structure",
                 "text_engine": "none",
                 "ocr_used": False,
                 "page_count": 0,
