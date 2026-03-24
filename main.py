@@ -1452,7 +1452,21 @@ def extract_pdf():
                 "ocr_error": None,
             }
         }), 200
+@app.route("/analyze", methods=["POST"])
+def analyze():
+    try:
+        data = request.get_json()
 
+        return jsonify({
+            "ok": True,
+            "received": data
+        }), 200
+
+    except Exception as e:
+        return jsonify({
+            "ok": False,
+            "error": str(e)
+        }), 200
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     app.run(host="0.0.0.0", port=port)
