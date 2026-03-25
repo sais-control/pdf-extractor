@@ -1457,8 +1457,887 @@ def extract_pdf():
             }
         }), 200
         
+REPORT_HINT_TYPES = [
+    "ARTIKELNUMMER_FEHLT",
+    "ARTIKELNUMMER_UNGUELTIG",
+    "BETRIEB_NICHT_ERKANNT",
+    "DOPPELTE_POSITION",
+    "DUPLIKAT_RECHNUNG",
+    "EINHEIT_ABWEICHUNG",
+    "EXTRAKTION_FEHLER",
+    "GEBUEHR_ERKANNT",
+    "GEBUEHR_POSITION",
+    "GUTSCHRIFT_ERKANNT",
+    "GUTSCHRIFT_POSITION",
+    "JSON_UNVOLLSTAENDIG",
+    "KOMMISSION_FEHLT",
+    "KOMMISSION_UNKLAR",
+    "KONTO_ABWEICHUNG",
+    "LIEFERANT_AUTO_ERSTELLT",
+    "LIEFERANT_NICHT_ERKANNT",
+    "MENGENABWEICHUNG",
+    "MWST_UNPLAUSIBEL",
+    "PREISABWEICHUNG",
+    "PREISSPRUNG_AUFFAELLIG",
+    "RECHNUNGSNUMMER_FEHLT",
+    "SKONTO_ABWEICHUNG",
+    "SKONTO_ERKANNT",
+]
+
+HINT_PRIORITY = {
+    "PREISABWEICHUNG": 100,
+    "MENGENABWEICHUNG": 95,
+    "PREISSPRUNG_AUFFAELLIG": 90,
+    "GEBUEHR_ERKANNT": 85,
+    "GEBUEHR_POSITION": 80,
+    "GUTSCHRIFT_ERKANNT": 78,
+    "GUTSCHRIFT_POSITION": 78,
+    "SKONTO_ABWEICHUNG": 75,
+    "KOMMISSION_UNKLAR": 72,
+    "KOMMISSION_FEHLT": 70,
+    "DUPLIKAT_RECHNUNG": 68,
+    "DOPPELTE_POSITION": 66,
+    "MWST_UNPLAUSIBEL": 64,
+    "LIEFERANT_NICHT_ERKANNT": 62,
+    "BETRIEB_NICHT_ERKANNT": 60,
+    "JSON_UNVOLLSTAENDIG": 55,
+    "EXTRAKTION_FEHLER": 55,
+    "ARTIKELNUMMER_UNGUELTIG": 40,
+    "ARTIKELNUMMER_FEHLT": 35,
+    "SKONTO_ERKANNT": 20,
+    "LIEFERANT_AUTO_ERSTELLT": 15,
+    "KONTO_ABWEICHUNG": 10,
+    "EINHEIT_ABWEICHUNG": 10,
+}
+
+GENERIC_COSTCENTER_VALUES = {
+    "", "0", "1", "p1", "p-1", "projekt", "lager", "test", "kaju"
+}
 
 
+def strip_accents(text):
+    text = str(text or "")
+    return "".join(
+        ch for ch in unicodedata.normalize("NFKD", text)
+        if not unicodedata.combining(ch)
+    )
+
+
+def normalize_spaces(text):
+    return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def normalize_basic(text):
+    text = strip_accents(text).lower().strip()
+    text = text.replace("–", "-").replace("—", "-")
+    text = text.replace("_", " ")
+    text = re.sub(r"[;,|]+", " ", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def normalize_name_report(text):
+    text = normalize_basic(text)
+    if not text:
+        return ""
+    text = re.sub(r"\bauftr\.?text\b[: ]*", " ", text)
+    text = re.sub(r"\bauftr\.?nr\b[: ]*", " ", text)
+    text = re.sub(r"\binnend\.?\b", " ", text)
+    text = re.sub(r"\baußend\.?\b", " ", text)
+    text = re.sub(r"\baussend\.?\b", " ", text)
+    text = re.sub(r"\bwebshop\b", "webshop", text)
+    text = re.sub(r"\bprojektleiter\b[: ]*", " ", text)
+    text = re.sub(r"\bbearbeiter\b[: ]*", " ", text)
+    text = re.sub(r"\bmonteur\b[: ]*", " ", text)
+    text = re.sub(r"\bserviceauftrag\b[: ]*\d+\b", " ", text)
+    text = re.sub(r"\bauftragsnummer\b[: ]*\d+\b", " ", text)
+    text = re.sub(r"\btechnische einheit\b[: ]*[\wäöüß\- ]+", " ", text)
+    text = re.sub(r"\bdurchgefuhrte arbeiten\b[: ]*.*", " ", text)
+    text = re.sub(r"\bausfuhrdatum\b[: ]*[\d\-.]+", " ", text)
+    text = re.sub(r"[^a-z0-9äöüß\- ]", " ", text)
+    text = normalize_spaces(text)
+    return text
+
+
+def normalize_address_report(text):
+    text = normalize_basic(text)
+    if not text:
+        return ""
+
+    text = text.replace("strasse", "str")
+    text = text.replace("straße", "str")
+    text = text.replace("str.", "str")
+    text = re.sub(r"\bdeutschland\b", " ", text)
+    text = re.sub(r"\bde\b", " ", text)
+    text = re.sub(r"\bjuni gebaudetechnik gmbh\b", " ", text)
+    text = re.sub(r"\bcornelius gellert str 104\b", " ", text)
+    text = re.sub(r"\bniestetal\b", " niestetal ", text)
+    text = re.sub(r"\binnend\.?\b", " ", text)
+    text = re.sub(r"\baußend\.?\b", " ", text)
+    text = re.sub(r"\baussend\.?\b", " ", text)
+    text = re.sub(r"\bobjekt\b[: ]*", " ", text)
+    text = re.sub(r"\bfur das objekt\b[: ]*", " ", text)
+    text = re.sub(r"\bfuer das objekt\b[: ]*", " ", text)
+    text = re.sub(r"\bin\b", " ", text)
+    text = re.sub(r"[^a-z0-9äöüß\- ]", " ", text)
+    text = re.sub(r"(\d+)\s*([a-z])\b", r"\1\2", text)
+    text = normalize_spaces(text)
+    return text
+
+
+def normalize_costcenter_report(text):
+    text = normalize_basic(text)
+    if not text:
+        return ""
+    text = re.sub(r"[^a-z0-9\-_/]", "", text)
+    text = text.upper()
+    return text
+
+
+def is_generic_costcenter(text):
+    value = normalize_costcenter_report(text).lower()
+    if value in GENERIC_COSTCENTER_VALUES:
+        return True
+    if re.fullmatch(r"p\d{1,2}", value or ""):
+        return True
+    if re.fullmatch(r"s\d{1,3}", value or ""):
+        return True
+    return False
+
+
+def parse_float_de(value):
+    if value is None:
+        return 0.0
+    if isinstance(value, (int, float)):
+        if isinstance(value, float) and math.isnan(value):
+            return 0.0
+        return float(value)
+
+    text = str(value).strip()
+    if not text:
+        return 0.0
+
+    text = text.replace("€", "").replace("%", "").replace(" ", "")
+    text = text.replace("\u00A0", "")
+
+    if "," in text and "." in text:
+        if text.rfind(",") > text.rfind("."):
+            text = text.replace(".", "").replace(",", ".")
+        else:
+            text = text.replace(",", "")
+    elif "," in text:
+        text = text.replace(".", "").replace(",", ".")
+    else:
+        pass
+
+    text = re.sub(r"[^0-9\.\-]", "", text)
+    if text in {"", "-", ".", "-."}:
+        return 0.0
+
+    try:
+        return float(text)
+    except Exception:
+        return 0.0
+
+
+def parse_int_safe(value):
+    try:
+        return int(float(str(value).replace(",", ".").strip()))
+    except Exception:
+        return 0
+
+
+def parse_iso_date_flexible(value):
+    if not value:
+        return None
+
+    value = str(value).strip()
+    if not value:
+        return None
+
+    if len(value) == 10 and value.count("-") == 2:
+        try:
+            return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except Exception:
+            return None
+
+    if value.endswith("Z"):
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except Exception:
+            pass
+
+    try:
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
+def is_in_period(value, start_dt, end_dt):
+    dt = parse_iso_date_flexible(value)
+    if not dt:
+        return False
+    return start_dt <= dt <= end_dt
+
+
+def detect_document_type(invoice):
+    raw_type = normalize_basic(invoice.get("dokumenttyp"))
+    brutto = parse_float_de(invoice.get("brutto_summe"))
+
+    if "gutschrift" in raw_type:
+        return "GUTSCHRIFT"
+    if "lastschrift" in raw_type:
+        return "LASTSCHRIFTAVIS"
+    if brutto < 0:
+        return "GUTSCHRIFT"
+    return "RECHNUNG"
+
+
+def normalize_supplier_name(text):
+    text = normalize_basic(text)
+    text = re.sub(r"\blieferant\b[_ ]*", "", text)
+    text = normalize_spaces(text).upper()
+    return text or "UNBEKANNT"
+
+
+def normalize_project_text(text):
+    text = normalize_basic(text)
+    if not text:
+        return ""
+    text = text.replace("auftr.text", "auftrtext")
+    text = text.replace("auftr.nr", "auftrnr")
+    text = re.sub(r"[^a-z0-9äöüß\- ]", " ", text)
+    text = normalize_spaces(text)
+    return text
+
+
+def extract_name_from_project_text(text):
+    text = normalize_project_text(text)
+    if not text:
+        return ""
+
+    patterns = [
+        r"auftrtext[: ]+([a-zäöüß\- ]{3,80})",
+        r"auftrnr[: ]+([a-z0-9\-_/]{2,40})",
+    ]
+    for pattern in patterns:
+        m = re.search(pattern, text)
+        if m:
+            value = normalize_name_report(m.group(1))
+            if value:
+                return value
+
+    return ""
+
+
+def build_invoice_record(raw):
+    invoice = dict(raw or {})
+
+    invoice["rechnung_id"] = str(invoice.get("rechnung_id") or "").strip()
+    invoice["rechnungsnummer"] = str(invoice.get("rechnungsnummer") or "").strip()
+    invoice["rechnungsdatum"] = str(invoice.get("rechnungsdatum") or "").strip()
+    invoice["eingangsdatum"] = str(invoice.get("eingangsdatum") or "").strip()
+    invoice["lieferant_id"] = str(invoice.get("lieferant_id") or "").strip()
+    invoice["lieferant_name"] = normalize_supplier_name(invoice.get("lieferant_name"))
+    invoice["brutto_summe"] = parse_float_de(invoice.get("brutto_summe"))
+    invoice["netto_summe"] = parse_float_de(invoice.get("netto_summe"))
+    invoice["dokumenttyp"] = detect_document_type(invoice)
+    invoice["gesamtbewertung"] = normalize_basic(invoice.get("gesamtbewertung")).upper() or "OK"
+    invoice["hinweise_anzahl"] = parse_int_safe(invoice.get("hinweise_anzahl"))
+    invoice["faelligkeitsdatum"] = str(invoice.get("faelligkeitsdatum") or "").strip()
+    invoice["skonto_prozent"] = parse_float_de(invoice.get("skonto_prozent"))
+    invoice["skonto_betrag"] = parse_float_de(invoice.get("skonto_betrag"))
+    invoice["kommission"] = normalize_spaces(invoice.get("kommission"))
+    invoice["kostenstelle"] = normalize_spaces(invoice.get("kostenstelle"))
+    invoice["baustelle"] = normalize_spaces(invoice.get("baustelle"))
+    invoice["projekt_hinweis_text"] = normalize_spaces(invoice.get("projekt_hinweis_text"))
+
+    invoice["_kommission_norm"] = normalize_name_report(invoice["kommission"]) or extract_name_from_project_text(invoice["projekt_hinweis_text"])
+    invoice["_kostenstelle_norm"] = normalize_costcenter_report(invoice["kostenstelle"])
+    invoice["_baustelle_norm"] = normalize_address_report(invoice["baustelle"] or invoice["projekt_hinweis_text"])
+    invoice["_projekt_text_norm"] = normalize_project_text(invoice["projekt_hinweis_text"])
+
+    invoice["_severity_seed"] = 0
+    return invoice
+
+
+def build_hint_record(raw):
+    hint = dict(raw or {})
+    hint["betrieb_id"] = str(hint.get("betrieb_id") or "").strip()
+    hint["rechnung_id"] = str(hint.get("rechnung_id") or "").strip()
+    hint["hinweis_typ"] = str(hint.get("hinweis_typ") or "").strip().upper()
+    hint["schweregrad"] = normalize_basic(hint.get("schweregrad"))
+    hint["status"] = normalize_basic(hint.get("status"))
+    hint["erkannt_am"] = str(hint.get("erkannt_am") or "").strip()
+    hint["bezug_typ"] = str(hint.get("bezug_typ") or "").strip()
+    hint["bezug_schluessel"] = str(hint.get("bezug_schluessel") or "").strip()
+    hint["kurzbeschreibung"] = normalize_spaces(hint.get("kurzbeschreibung"))
+    hint["aktion_empfohlen"] = normalize_spaces(hint.get("aktion_empfohlen"))
+    return hint
+
+
+def dedupe_invoices(invoices):
+    grouped = defaultdict(list)
+
+    for inv in invoices:
+        key = (
+            inv.get("lieferant_name", ""),
+            inv.get("rechnungsnummer", ""),
+            round(abs(inv.get("brutto_summe", 0.0)), 2),
+            inv.get("dokumenttyp", ""),
+            inv.get("rechnungsdatum", "") or inv.get("eingangsdatum", ""),
+        )
+        grouped[key].append(inv)
+
+    deduped = []
+    for _, items in grouped.items():
+        if len(items) == 1:
+            deduped.append(items[0])
+            continue
+
+        def score_invoice(x):
+            completeness = sum(
+                1 for field in [
+                    x.get("rechnung_id"),
+                    x.get("rechnungsnummer"),
+                    x.get("rechnungsdatum"),
+                    x.get("eingangsdatum"),
+                    x.get("lieferant_name"),
+                    x.get("faelligkeitsdatum"),
+                    x.get("kommission"),
+                    x.get("kostenstelle"),
+                    x.get("baustelle"),
+                    x.get("projekt_hinweis_text"),
+                ] if str(field or "").strip()
+            )
+            return (
+                completeness,
+                len(str(x.get("projekt_hinweis_text") or "")),
+                len(str(x.get("baustelle") or "")),
+                len(str(x.get("kommission") or "")),
+                len(str(x.get("rechnung_id") or "")),
+            )
+
+        best = sorted(items, key=score_invoice, reverse=True)[0]
+        deduped.append(best)
+
+    return deduped
+
+
+def merge_duplicate_project_clusters(clusters):
+    merged = []
+    used = set()
+
+    for i, base in enumerate(clusters):
+        if i in used:
+            continue
+
+        current = dict(base)
+        current["zugeordnete_rechnung_ids"] = list(base["zugeordnete_rechnung_ids"])
+        current["match_hinweise"] = list(base["match_hinweise"])
+
+        for j in range(i + 1, len(clusters)):
+            if j in used:
+                continue
+            other = clusters[j]
+
+            same_strong_costcenter = (
+                current.get("_kostenstelle_norm")
+                and other.get("_kostenstelle_norm")
+                and current["_kostenstelle_norm"] == other["_kostenstelle_norm"]
+                and not is_generic_costcenter(current["_kostenstelle_norm"])
+            )
+            same_address = (
+                current.get("_baustelle_norm")
+                and other.get("_baustelle_norm")
+                and current["_baustelle_norm"] == other["_baustelle_norm"]
+            )
+            same_name = (
+                current.get("_kommission_norm")
+                and other.get("_kommission_norm")
+                and (
+                    current["_kommission_norm"] == other["_kommission_norm"]
+                    or current["_kommission_norm"] in other["_kommission_norm"]
+                    or other["_kommission_norm"] in current["_kommission_norm"]
+                )
+            )
+
+            should_merge = False
+            if same_strong_costcenter and (same_address or same_name):
+                should_merge = True
+            elif same_address and same_name:
+                should_merge = True
+            elif same_address and current.get("_kostenstelle_norm") == other.get("_kostenstelle_norm") and current.get("_kostenstelle_norm"):
+                should_merge = True
+
+            if should_merge:
+                used.add(j)
+                current["zugeordnete_rechnung_ids"] = list(
+                    dict.fromkeys(current["zugeordnete_rechnung_ids"] + other["zugeordnete_rechnung_ids"])
+                )
+                current["projekt_summe_brutto"] += other["projekt_summe_brutto"]
+                current["anzahl_rechnungen"] = len(current["zugeordnete_rechnung_ids"])
+                current["match_hinweise"] = list(
+                    dict.fromkeys(current["match_hinweise"] + other["match_hinweise"] + ["NACHMERGE"])
+                )
+                current["confidence"] = max(current["confidence"], other["confidence"])
+
+                if not current.get("erkannte_kostenstelle") and other.get("erkannte_kostenstelle"):
+                    current["erkannte_kostenstelle"] = other["erkannte_kostenstelle"]
+                    current["_kostenstelle_norm"] = other.get("_kostenstelle_norm", "")
+                if not current.get("erkannte_baustelle") and other.get("erkannte_baustelle"):
+                    current["erkannte_baustelle"] = other["erkannte_baustelle"]
+                    current["_baustelle_norm"] = other.get("_baustelle_norm", "")
+                if not current.get("erkannte_kommission") and other.get("erkannte_kommission"):
+                    current["erkannte_kommission"] = other["erkannte_kommission"]
+                    current["_kommission_norm"] = other.get("_kommission_norm", "")
+
+        merged.append(current)
+
+    return merged
+
+
+def build_project_clusters_report(invoices):
+    clusters = []
+    cluster_index = 1
+
+    for inv in invoices:
+        if inv.get("dokumenttyp") not in {"RECHNUNG", "GUTSCHRIFT"}:
+            continue
+
+        name_norm = inv.get("_kommission_norm", "")
+        cost_norm = inv.get("_kostenstelle_norm", "")
+        addr_norm = inv.get("_baustelle_norm", "")
+        brutto = inv.get("brutto_summe", 0.0)
+
+        best_cluster_idx = None
+        best_score = -1
+        best_reasons = []
+
+        for idx, cl in enumerate(clusters):
+            score = 0
+            reasons = []
+
+            cl_cost = cl.get("_kostenstelle_norm", "")
+            cl_addr = cl.get("_baustelle_norm", "")
+            cl_name = cl.get("_kommission_norm", "")
+
+            if cost_norm and cl_cost and cost_norm == cl_cost:
+                if is_generic_costcenter(cost_norm):
+                    score += 20
+                    reasons.append("KOSTENSTELLE_GENERISCH_GLEICH")
+                else:
+                    score += 65
+                    reasons.append("KOSTENSTELLE_GLEICH")
+
+            if addr_norm and cl_addr and addr_norm == cl_addr:
+                score += 45
+                reasons.append("BAUSTELLE_GLEICH")
+
+            if name_norm and cl_name:
+                if name_norm == cl_name:
+                    score += 35
+                    reasons.append("KOMMISSION_GLEICH")
+                elif name_norm in cl_name or cl_name in name_norm:
+                    score += 22
+                    reasons.append("KOMMISSION_AEHNLICH")
+
+            if cost_norm and cl_cost and cost_norm == cl_cost and addr_norm and cl_addr and addr_norm != cl_addr:
+                reasons.append("BAUSTELLE_ABWEICHEND_ABER_KOSTENSTELLE_STARK")
+
+            if score > best_score:
+                best_score = score
+                best_cluster_idx = idx
+                best_reasons = reasons
+
+        should_attach = best_score >= 60 or (
+            best_score >= 45 and addr_norm and name_norm
+        )
+
+        if should_attach and best_cluster_idx is not None:
+            cl = clusters[best_cluster_idx]
+            cl["zugeordnete_rechnung_ids"].append(inv["rechnung_id"])
+            cl["projekt_summe_brutto"] += brutto
+            cl["anzahl_rechnungen"] = len(cl["zugeordnete_rechnung_ids"])
+            cl["match_hinweise"] = list(dict.fromkeys(cl["match_hinweise"] + best_reasons))
+
+            if not cl.get("erkannte_kostenstelle") and inv.get("kostenstelle"):
+                cl["erkannte_kostenstelle"] = inv["kostenstelle"]
+                cl["_kostenstelle_norm"] = cost_norm
+            if not cl.get("erkannte_baustelle") and inv.get("baustelle"):
+                cl["erkannte_baustelle"] = inv["baustelle"]
+                cl["_baustelle_norm"] = addr_norm
+            if not cl.get("erkannte_kommission") and inv.get("kommission"):
+                cl["erkannte_kommission"] = inv["kommission"]
+                cl["_kommission_norm"] = name_norm
+
+            cl["confidence"] = min(0.98, max(cl["confidence"], 0.5 + (best_score / 120.0)))
+        else:
+            confidence = 0.5
+            if cost_norm and not is_generic_costcenter(cost_norm):
+                confidence += 0.3
+            if addr_norm:
+                confidence += 0.05
+            if name_norm:
+                confidence += 0.1
+            confidence = min(confidence, 0.98)
+
+            clusters.append({
+                "projekt_cluster_id": f"PC_{cluster_index:04d}",
+                "erkannte_kostenstelle": inv.get("kostenstelle") or "",
+                "erkannte_kommission": inv.get("kommission") or "",
+                "erkannte_baustelle": inv.get("baustelle") or "",
+                "projekt_summe_brutto": brutto,
+                "anzahl_rechnungen": 1,
+                "confidence": confidence,
+                "match_hinweise": ["NEUES_CLUSTER"],
+                "status": "sicher" if confidence >= 0.8 else "mittel" if confidence >= 0.55 else "unsicher",
+                "offen_unterbestimmt": not bool(cost_norm or addr_norm or name_norm),
+                "zugeordnete_rechnung_ids": [inv["rechnung_id"]],
+                "_kostenstelle_norm": cost_norm,
+                "_kommission_norm": name_norm,
+                "_baustelle_norm": addr_norm,
+            })
+            cluster_index += 1
+
+    clusters = merge_duplicate_project_clusters(clusters)
+
+    for cl in clusters:
+        cl["anzahl_rechnungen"] = len(cl["zugeordnete_rechnung_ids"])
+        cl["match_hinweise"] = list(dict.fromkeys(cl["match_hinweise"]))
+        cl["status"] = "sicher" if cl["confidence"] >= 0.8 else "mittel" if cl["confidence"] >= 0.55 else "unsicher"
+
+    def cluster_sort_key(c):
+        return (c["projekt_summe_brutto"], c["anzahl_rechnungen"], c["confidence"])
+
+    clusters = sorted(clusters, key=cluster_sort_key, reverse=True)
+
+    for cl in clusters:
+        cl.pop("_kostenstelle_norm", None)
+        cl.pop("_kommission_norm", None)
+        cl.pop("_baustelle_norm", None)
+
+    return clusters
+
+
+def aggregate_hints(hints):
+    counts = {hint_type: 0 for hint_type in REPORT_HINT_TYPES}
+    extra_counts = Counter()
+
+    for h in hints:
+        hint_type = h.get("hinweis_typ") or ""
+        if hint_type in counts:
+            counts[hint_type] += 1
+        else:
+            extra_counts[hint_type or "UNBEKANNT"] += 1
+
+    for key, value in extra_counts.items():
+        counts[key] = value
+
+    return counts
+
+
+def build_hint_index(hints):
+    by_invoice = defaultdict(list)
+    for h in hints:
+        by_invoice[h.get("rechnung_id")].append(h)
+    return by_invoice
+
+
+def build_supplier_summary(invoices, hint_index):
+    grouped = defaultdict(lambda: {
+        "anzahl_rechnungen": 0,
+        "auffaellige_rechnungen": 0,
+        "hinweise_gesamt": 0,
+        "lieferant_name": "UNBEKANNT",
+        "summe_brutto": 0.0,
+    })
+
+    for inv in invoices:
+        supplier = inv.get("lieferant_name") or "UNBEKANNT"
+        rec = grouped[supplier]
+        rec["lieferant_name"] = supplier
+        rec["anzahl_rechnungen"] += 1
+        rec["summe_brutto"] += inv.get("brutto_summe", 0.0)
+        inv_hints = hint_index.get(inv.get("rechnung_id"), [])
+        rec["hinweise_gesamt"] += len(inv_hints)
+        if inv.get("gesamtbewertung") != "OK" or inv_hints:
+            rec["auffaellige_rechnungen"] += 1
+
+    rows = sorted(grouped.values(), key=lambda x: x["summe_brutto"], reverse=True)
+    for row in rows:
+        row["summe_brutto"] = round(row["summe_brutto"], 2)
+    return rows
+
+
+def build_payment_summary(invoices, end_dt):
+    faellige = []
+    skonto = []
+
+    for inv in invoices:
+        brutto = inv.get("brutto_summe", 0.0)
+        dokumenttyp = inv.get("dokumenttyp")
+
+        if dokumenttyp == "RECHNUNG" and brutto > 0:
+            due = parse_iso_date_flexible(inv.get("faelligkeitsdatum"))
+            if due and end_dt and due <= end_dt:
+                faellige.append({
+                    "rechnung_id": inv.get("rechnung_id"),
+                    "rechnungsnummer": inv.get("rechnungsnummer"),
+                    "lieferant_name": inv.get("lieferant_name"),
+                    "faelligkeitsdatum": inv.get("faelligkeitsdatum"),
+                    "brutto_summe": round(brutto, 2),
+                })
+
+        skonto_prozent = inv.get("skonto_prozent", 0.0)
+        skonto_betrag = inv.get("skonto_betrag", 0.0)
+        if dokumenttyp == "RECHNUNG" and brutto > 0 and skonto_prozent > 0 and skonto_betrag > 0:
+            skonto.append({
+                "rechnung_id": inv.get("rechnung_id"),
+                "rechnungsnummer": inv.get("rechnungsnummer"),
+                "lieferant_name": inv.get("lieferant_name"),
+                "skonto_prozent": round(skonto_prozent, 2),
+                "skonto_betrag": round(skonto_betrag, 2),
+            })
+
+    faellige = sorted(
+        faellige,
+        key=lambda x: parse_float_de(x.get("brutto_summe")),
+        reverse=True
+    )
+    skonto = sorted(
+        skonto,
+        key=lambda x: parse_float_de(x.get("skonto_betrag")),
+        reverse=True
+    )
+
+    return {
+        "faellige_rechnungen": faellige,
+        "faellige_rechnungen_anzahl": len(faellige),
+        "summe_faellig": round(sum(x["brutto_summe"] for x in faellige), 2),
+        "skonto_chancen": skonto[:20],
+    }
+
+
+def invoice_priority_score(inv, invoice_hints):
+    hint_types = [h.get("hinweis_typ") for h in invoice_hints]
+    max_hint_priority = max([HINT_PRIORITY.get(ht, 5) for ht in hint_types] + [0])
+    amount_score = min(abs(inv.get("brutto_summe", 0.0)) / 100.0, 50.0)
+
+    doc_bonus = 8 if inv.get("dokumenttyp") == "GUTSCHRIFT" else 0
+    status_bonus = 8 if inv.get("gesamtbewertung") != "OK" else 0
+    hint_count_bonus = min(len(invoice_hints) * 4, 20)
+
+    return max_hint_priority + amount_score + doc_bonus + status_bonus + hint_count_bonus
+
+
+def build_important_invoices(invoices, hint_index, limit=10):
+    rows = []
+
+    for inv in invoices:
+        inv_hints = hint_index.get(inv.get("rechnung_id"), [])
+        if not inv_hints and inv.get("gesamtbewertung") == "OK":
+            continue
+
+        hint_types = sorted(set(h.get("hinweis_typ") for h in inv_hints if h.get("hinweis_typ")))
+        rows.append({
+            "rechnung_id": inv.get("rechnung_id"),
+            "rechnungsnummer": inv.get("rechnungsnummer"),
+            "lieferant_name": inv.get("lieferant_name"),
+            "brutto_summe": round(inv.get("brutto_summe", 0.0), 2),
+            "hinweise_anzahl": len(inv_hints),
+            "hinweis_typen": hint_types,
+            "_score": invoice_priority_score(inv, inv_hints),
+        })
+
+    rows = sorted(rows, key=lambda x: (x["_score"], abs(x["brutto_summe"])), reverse=True)
+    for row in rows:
+        row.pop("_score", None)
+    return rows[:limit]
+
+
+def build_email_summary(summary, hint_breakdown, supplier_rows, payment, mode):
+    rechnungen_gesamt = summary["rechnungen_gesamt"]
+    summe_brutto = summary["summe_brutto"]
+    rechnungen_ok = summary["rechnungen_ok"]
+    rechnungen_auffaellig = summary["rechnungen_auffaellig"]
+    gutschriften_anzahl = summary["gutschriften_anzahl"]
+
+    sorted_hints = sorted(
+        [(k, v) for k, v in hint_breakdown.items() if v > 0],
+        key=lambda x: (HINT_PRIORITY.get(x[0], 0), x[1]),
+        reverse=True
+    )
+    top_hints = sorted_hints[:3]
+    hint_text = ", ".join([f"{k}: {v}" for k, v in top_hints]) if top_hints else "keine"
+
+    supplier_text = "kein Lieferant"
+    if supplier_rows:
+        supplier_text = f"{supplier_rows[0]['lieferant_name']} mit {supplier_rows[0]['summe_brutto']:.2f} Volumen"
+
+    faellig_text = ""
+    if payment["faellige_rechnungen_anzahl"] > 0:
+        faellig_text = (
+            f" Aktuell sind {payment['faellige_rechnungen_anzahl']} Rechnungen "
+            f"mit insgesamt {payment['summe_faellig']:.2f} fällig."
+        )
+
+    skonto_text = ""
+    if payment["skonto_chancen"]:
+        top_skonto = payment["skonto_chancen"][:3]
+        top_skonto_sum = round(sum(x["skonto_betrag"] for x in top_skonto), 2)
+        skonto_text = f" Zusätzlich bestehen relevante Skonto-Chancen, allein die Top-3 liegen bei {top_skonto_sum:.2f}."
+
+    report_label = mode or "Report"
+
+    return (
+        f"Im Zeitraum wurden {rechnungen_gesamt} Rechnungen mit einem Gesamtvolumen von {summe_brutto:.2f} verarbeitet. "
+        f"Davon waren {rechnungen_ok} unauffällig und {rechnungen_auffaellig} auffällig. "
+        f"Zusätzlich wurden {gutschriften_anzahl} Gutschriften erkannt. "
+        f"Die wichtigsten Hinweisarten waren {hint_text}. "
+        f"Größter Lieferant im {report_label} war {supplier_text}."
+        f"{faellig_text}{skonto_text}"
+    )
+
+
+@app.route("/analyze", methods=["POST"])
+def analyze():
+    try:
+        data = request.get_json() or {}
+
+        mode = str(data.get("mode") or "wochen_report").strip()
+        betrieb_id = str(data.get("betrieb_id") or "").strip()
+        zeitraum = data.get("zeitraum", {}) or {}
+
+        start_raw = zeitraum.get("start")
+        end_raw = zeitraum.get("ende")
+
+        rechnungen_raw = data.get("rechnungen", []) or []
+        hinweise_raw = data.get("hinweise", []) or []
+        historische_raw = data.get("historische_rechnungen", []) or []
+
+        start_dt = parse_iso_date_flexible(start_raw)
+        end_dt = parse_iso_date_flexible(end_raw)
+
+        rechnungen = [build_invoice_record(x) for x in rechnungen_raw]
+        historische_rechnungen = [build_invoice_record(x) for x in historische_raw]
+        hinweise = [build_hint_record(x) for x in hinweise_raw]
+
+        if start_dt and end_dt:
+            rechnungen = [
+                r for r in rechnungen
+                if is_in_period(r.get("rechnungsdatum") or r.get("eingangsdatum"), start_dt, end_dt)
+            ]
+            hinweise = [
+                h for h in hinweise
+                if is_in_period(h.get("erkannt_am"), start_dt, end_dt)
+            ]
+
+        if betrieb_id:
+            hinweise = [
+                h for h in hinweise
+                if not h.get("betrieb_id") or h.get("betrieb_id") == betrieb_id
+            ]
+
+        rechnungen = dedupe_invoices(rechnungen)
+
+        hint_index = build_hint_index(hinweise)
+
+        for inv in rechnungen:
+            inv_hints = hint_index.get(inv["rechnung_id"], [])
+            inv["hinweise_anzahl"] = max(inv.get("hinweise_anzahl", 0), len(inv_hints))
+            inv["_severity_seed"] = invoice_priority_score(inv, inv_hints)
+
+            if inv_hints and inv.get("gesamtbewertung") == "OK":
+                inv["gesamtbewertung"] = "HINWEIS"
+
+        clustering_pool = rechnungen + historische_rechnungen
+        clustering_pool = dedupe_invoices(clustering_pool)
+        projekt_cluster = build_project_clusters_report(clustering_pool)
+
+        current_ids = {r["rechnung_id"] for r in rechnungen}
+        report_clusters = []
+        for cl in projekt_cluster:
+            current_cluster_ids = [rid for rid in cl["zugeordnete_rechnung_ids"] if rid in current_ids]
+            if not current_cluster_ids:
+                continue
+            copied = dict(cl)
+            copied["zugeordnete_rechnung_ids"] = current_cluster_ids
+            copied["anzahl_rechnungen"] = len(current_cluster_ids)
+            report_clusters.append(copied)
+
+        hinweis_breakdown = aggregate_hints(hinweise)
+        supplier_rows = build_supplier_summary(rechnungen, hint_index)
+        payment = build_payment_summary(rechnungen, end_dt)
+        wichtige_rechnungen = build_important_invoices(rechnungen, hint_index, limit=10)
+
+        rechnungen_gesamt = len(rechnungen)
+        gutschriften_anzahl = sum(1 for r in rechnungen if r.get("dokumenttyp") == "GUTSCHRIFT")
+        rechnungen_auffaellig = sum(
+            1 for r in rechnungen
+            if r.get("gesamtbewertung") != "OK" or len(hint_index.get(r.get("rechnung_id"), [])) > 0
+        )
+        rechnungen_ok = max(rechnungen_gesamt - rechnungen_auffaellig, 0)
+        summe_brutto = round(sum(r.get("brutto_summe", 0.0) for r in rechnungen), 2)
+        hinweise_gesamt = len(hinweise)
+
+        summary = {
+            "rechnungen_gesamt": rechnungen_gesamt,
+            "summe_brutto": summe_brutto,
+            "rechnungen_ok": rechnungen_ok,
+            "rechnungen_auffaellig": rechnungen_auffaellig,
+            "gutschriften_anzahl": gutschriften_anzahl,
+            "faellige_rechnungen": payment["faellige_rechnungen_anzahl"],
+            "summe_faellig": payment["summe_faellig"],
+            "hinweise_gesamt": hinweise_gesamt,
+        }
+
+        unklare_cluster = [
+            cl for cl in report_clusters
+            if cl.get("status") in {"mittel", "unsicher"} or cl.get("offen_unterbestimmt")
+        ]
+
+        email_summary = build_email_summary(
+            summary=summary,
+            hint_breakdown=hinweis_breakdown,
+            supplier_rows=supplier_rows,
+            payment=payment,
+            mode=mode
+        )
+
+        result = {
+            "ok": True,
+            "meta": {
+                "report_type": mode,
+                "betrieb_id": betrieb_id,
+                "zeitraum_start": start_raw,
+                "zeitraum_ende": end_raw,
+                "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            },
+            "summary": summary,
+            "hinweis_breakdown": hinweis_breakdown,
+            "lieferanten": {
+                "top_lieferanten": supplier_rows[:10]
+            },
+            "projekt_cluster": report_clusters,
+            "payment": payment,
+            "email_summary": email_summary,
+            "optional_details": {
+                "wichtige_rechnungen": wichtige_rechnungen,
+                "unklare_projektzuordnungen": unklare_cluster[:20],
+            }
+        }
+
+        return jsonify(result), 200
+
+    except Exception as e:
+        return jsonify({
+            "ok": False,
+            "error": str(e),
+        }), 200
         
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
