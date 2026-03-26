@@ -1887,76 +1887,167 @@ def extract_project_features(r):
         or ""
     )
 
+    kostenstelle_raw = str(kostenstelle or "").strip()
+    kommission_raw = str(kommission or "").strip()
+    baustelle_raw = str(baustelle or "").strip()
+    projekt_text_raw = str(projekt_text or "").strip()
+
     return {
-        "kostenstelle_raw": str(kostenstelle or "").strip(),
-        "kommission_raw": str(kommission or "").strip(),
-        "baustelle_raw": str(baustelle or "").strip(),
-        "projekt_text_raw": str(projekt_text or "").strip(),
+        "kostenstelle_raw": kostenstelle_raw,
+        "kommission_raw": kommission_raw,
+        "baustelle_raw": baustelle_raw,
+        "projekt_text_raw": projekt_text_raw,
 
-        "kostenstelle_norm": normalize_code(kostenstelle),
-        "kommission_norm": normalize_name(kommission),
-        "baustelle_norm": normalize_address(baustelle),
-        "projekt_text_norm": normalize_name(projekt_text),
+        "kostenstelle_norm": normalize_code(kostenstelle_raw),
+        "kommission_norm": normalize_name(kommission_raw),
+        "baustelle_norm": normalize_address(baustelle_raw),
+        "projekt_text_norm": normalize_name(projekt_text_raw),
 
-        "kostenstelle_generisch": is_generic_kostenstelle(kostenstelle),
+        "kostenstelle_generisch": is_generic_kostenstelle(kostenstelle_raw),
     }
+
+def _contains_token(text_norm, token_norm):
+    if not text_norm or not token_norm:
+        return False
+    return token_norm in text_norm
+
+def _best_text_value(values):
+    values = [str(v).strip() for v in values if str(v or "").strip()]
+    if not values:
+        return ""
+    c = Counter(values)
+    return c.most_common(1)[0][0]
 
 def cluster_match_score(cluster, feat):
     score = 0.0
     reasons = []
 
-    if feat["kostenstelle_norm"] and cluster["kostenstelle_norm"]:
+    feat_has_k = bool(feat["kostenstelle_norm"])
+    feat_has_c = bool(feat["kommission_norm"])
+    feat_has_b = bool(feat["baustelle_norm"])
+    feat_has_t = bool(feat["projekt_text_norm"])
+
+    clu_has_k = bool(cluster["kostenstelle_norm"])
+    clu_has_c = bool(cluster["kommission_norm"])
+    clu_has_b = bool(cluster["baustelle_norm"])
+
+    # ---------------------------------
+    # 1) KOSTENSTELLE
+    # ---------------------------------
+    if feat_has_k and clu_has_k:
         if feat["kostenstelle_norm"] == cluster["kostenstelle_norm"]:
             if feat["kostenstelle_generisch"] or cluster.get("kostenstelle_generisch", False):
-                score += 0.25
+                score += 0.8
                 reasons.append("KOSTENSTELLE_GENERISCH_GLEICH")
             else:
-                score += 1.0
+                score += 3.2
                 reasons.append("KOSTENSTELLE_GLEICH")
         else:
             if not feat["kostenstelle_generisch"] and not cluster.get("kostenstelle_generisch", False):
                 return 0.0, ["KOSTENSTELLE_KONFLIKT"]
 
-    if feat["baustelle_norm"] and cluster["baustelle_norm"]:
+    # ---------------------------------
+    # 2) BAUSTELLE
+    # ---------------------------------
+    if feat_has_b and clu_has_b:
         if feat["baustelle_norm"] == cluster["baustelle_norm"]:
-            score += 0.9
+            score += 2.8
             reasons.append("BAUSTELLE_GLEICH")
         else:
             sim = text_similarity(feat["baustelle_norm"], cluster["baustelle_norm"])
-            if sim >= 0.88:
-                score += 0.6
+            if sim >= 0.93:
+                score += 2.0
+                reasons.append("BAUSTELLE_SEHR_AEHNLICH")
+            elif sim >= 0.86:
+                score += 1.2
                 reasons.append("BAUSTELLE_AEHNLICH")
             elif (
-                cluster["kostenstelle_norm"]
-                and feat["kostenstelle_norm"]
-                and cluster["kostenstelle_norm"] == feat["kostenstelle_norm"]
+                feat_has_k and clu_has_k
+                and feat["kostenstelle_norm"] == cluster["kostenstelle_norm"]
                 and not feat["kostenstelle_generisch"]
                 and not cluster.get("kostenstelle_generisch", False)
             ):
+                score += 0.25
                 reasons.append("BAUSTELLE_ABWEICHEND_ABER_KOSTENSTELLE_STARK")
-            elif sim < 0.55:
+            else:
                 return 0.0, ["BAUSTELLE_KONFLIKT"]
 
-    if feat["kommission_norm"] and cluster["kommission_norm"]:
+    # ---------------------------------
+    # 3) KOMMISSION
+    # ---------------------------------
+    if feat_has_c and clu_has_c:
         if feat["kommission_norm"] == cluster["kommission_norm"]:
-            score += 0.45
+            score += 2.2
             reasons.append("KOMMISSION_GLEICH")
         else:
             sim = text_similarity(feat["kommission_norm"], cluster["kommission_norm"])
-            if sim >= 0.86:
-                score += 0.25
+            if sim >= 0.93:
+                score += 1.6
+                reasons.append("KOMMISSION_SEHR_AEHNLICH")
+            elif sim >= 0.86:
+                score += 0.9
                 reasons.append("KOMMISSION_AEHNLICH")
+            elif (
+                feat_has_k and clu_has_k
+                and feat["kostenstelle_norm"] == cluster["kostenstelle_norm"]
+                and not feat["kostenstelle_generisch"]
+                and not cluster.get("kostenstelle_generisch", False)
+            ):
+                score += 0.15
+                reasons.append("KOMMISSION_ABWEICHEND_ABER_KOSTENSTELLE_STARK")
 
-    if feat["projekt_text_norm"]:
-        if cluster["kostenstelle_norm"] and cluster["kostenstelle_norm"] in feat["projekt_text_norm"]:
-            score += 0.20
+    # ---------------------------------
+    # 4) PROJEKTTEXT / CROSS MATCH
+    # ---------------------------------
+    if feat_has_t:
+        if clu_has_k and _contains_token(feat["projekt_text_norm"], cluster["kostenstelle_norm"]):
+            score += 0.7
             reasons.append("TEXT_ENTHAELT_KOSTENSTELLE")
-        if cluster["kommission_norm"] and cluster["kommission_norm"] in feat["projekt_text_norm"]:
-            score += 0.15
+        if clu_has_c and _contains_token(feat["projekt_text_norm"], cluster["kommission_norm"]):
+            score += 0.6
             reasons.append("TEXT_ENTHAELT_KOMMISSION")
-        if cluster["baustelle_norm"] and cluster["baustelle_norm"] in feat["projekt_text_norm"]:
-            score += 0.15
+        if clu_has_b and _contains_token(feat["projekt_text_norm"], cluster["baustelle_norm"]):
+            score += 0.6
             reasons.append("TEXT_ENTHAELT_BAUSTELLE")
+
+    if cluster.get("projekt_text_norm"):
+        cluster_text = cluster["projekt_text_norm"]
+        if feat_has_k and _contains_token(cluster_text, feat["kostenstelle_norm"]):
+            score += 0.5
+            reasons.append("CLUSTER_TEXT_ENTHAELT_KOSTENSTELLE")
+        if feat_has_c and _contains_token(cluster_text, feat["kommission_norm"]):
+            score += 0.45
+            reasons.append("CLUSTER_TEXT_ENTHAELT_KOMMISSION")
+        if feat_has_b and _contains_token(cluster_text, feat["baustelle_norm"]):
+            score += 0.45
+            reasons.append("CLUSTER_TEXT_ENTHAELT_BAUSTELLE")
+
+    # ---------------------------------
+    # 5) MINDESTLOGIK
+    # ---------------------------------
+    harte_treffer = 0
+    if "KOSTENSTELLE_GLEICH" in reasons:
+        harte_treffer += 1
+    if "BAUSTELLE_GLEICH" in reasons or "BAUSTELLE_SEHR_AEHNLICH" in reasons:
+        harte_treffer += 1
+    if "KOMMISSION_GLEICH" in reasons or "KOMMISSION_SEHR_AEHNLICH" in reasons:
+        harte_treffer += 1
+
+    # Wenn nur generische Kostenstelle ohne weitere Signale -> nicht matchen
+    if score < 1.2:
+        return 0.0, reasons
+
+    if (
+        feat_has_k and clu_has_k
+        and feat["kostenstelle_norm"] == cluster["kostenstelle_norm"]
+        and (feat["kostenstelle_generisch"] or cluster.get("kostenstelle_generisch", False))
+        and harte_treffer == 0
+        and "TEXT_ENTHAELT_KOMMISSION" not in reasons
+        and "TEXT_ENTHAELT_BAUSTELLE" not in reasons
+        and "CLUSTER_TEXT_ENTHAELT_KOMMISSION" not in reasons
+        and "CLUSTER_TEXT_ENTHAELT_BAUSTELLE" not in reasons
+    ):
+        return 0.0, ["NUR_GENERISCHE_KOSTENSTELLE"]
 
     return score, reasons
 
@@ -1990,7 +2081,8 @@ def build_project_clusters(rechnungen):
                 best_idx = idx
                 best_reasons = reasons
 
-        match_threshold = 0.95
+        # deutlich strenger als vorher
+        match_threshold = 2.4
 
         if best_idx is not None and best_score >= match_threshold:
             c = clusters[best_idx]
@@ -2009,7 +2101,14 @@ def build_project_clusters(rechnungen):
 
             c["match_reasons"].extend(best_reasons)
 
-            if feat["kostenstelle_norm"] and not c["kostenstelle_generisch"]:
+            # stärkste Felder pflegen
+            if (
+                feat["kostenstelle_norm"]
+                and (
+                    not c["kostenstelle_norm"]
+                    or (not feat["kostenstelle_generisch"] and c.get("kostenstelle_generisch", False))
+                )
+            ):
                 c["kostenstelle_norm"] = feat["kostenstelle_norm"]
                 c["kostenstelle_generisch"] = feat["kostenstelle_generisch"]
 
@@ -2018,6 +2117,12 @@ def build_project_clusters(rechnungen):
 
             if feat["baustelle_norm"] and not c["baustelle_norm"]:
                 c["baustelle_norm"] = feat["baustelle_norm"]
+
+            if feat["projekt_text_norm"]:
+                if not c.get("projekt_text_norm"):
+                    c["projekt_text_norm"] = feat["projekt_text_norm"]
+                else:
+                    c["projekt_text_norm"] = (c["projekt_text_norm"] + " " + feat["projekt_text_norm"]).strip()
 
         else:
             clusters.append({
@@ -2029,6 +2134,7 @@ def build_project_clusters(rechnungen):
                 "kostenstelle_norm": feat["kostenstelle_norm"],
                 "kommission_norm": feat["kommission_norm"],
                 "baustelle_norm": feat["baustelle_norm"],
+                "projekt_text_norm": feat["projekt_text_norm"],
                 "kostenstelle_generisch": feat["kostenstelle_generisch"],
 
                 "kostenstelle_values": [feat["kostenstelle_raw"]] if feat["kostenstelle_raw"] else [],
@@ -2042,22 +2148,35 @@ def build_project_clusters(rechnungen):
     result = []
 
     for c in clusters:
-        kostenstelle = choose_best_value(c["kostenstelle_values"])
-        kommission = choose_best_value(c["kommission_values"])
-        baustelle = choose_best_value(c["baustelle_values"])
+        kostenstelle = _best_text_value(c["kostenstelle_values"])
+        kommission = _best_text_value(c["kommission_values"])
+        baustelle = _best_text_value(c["baustelle_values"])
 
-        confidence = 0.25
+        confidence = 0.20
+
         if kostenstelle and not is_generic_kostenstelle(kostenstelle):
             confidence += 0.35
         elif kostenstelle:
-            confidence += 0.10
+            confidence += 0.08
+
+        if kommission:
+            confidence += 0.20
 
         if baustelle:
             confidence += 0.25
-        if kommission:
-            confidence += 0.15
+
         if len(c["rechnung_ids"]) >= 2:
-            confidence += 0.10
+            confidence += 0.12
+        if len(c["rechnung_ids"]) >= 4:
+            confidence += 0.05
+
+        reasons_set = set(c["match_reasons"])
+        if "KOSTENSTELLE_GLEICH" in reasons_set:
+            confidence += 0.08
+        if "BAUSTELLE_GLEICH" in reasons_set:
+            confidence += 0.08
+        if "KOMMISSION_GLEICH" in reasons_set:
+            confidence += 0.06
 
         confidence = min(round(confidence, 2), 0.98)
 
