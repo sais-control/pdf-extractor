@@ -2952,13 +2952,8 @@ def analyze():
 
         projekt_cluster_result = build_project_clusters(cluster_input)
 
-        projekt_cluster = projekt_cluster_result["alle"]
-        projekt_cluster_voll = projekt_cluster_result["voll_zugeordnet"]
-        projekt_cluster_teil = projekt_cluster_result["teilweise_zugeordnet"]
-        projekt_cluster_unklar = projekt_cluster_result["unklar_oder_einzeln"]
-
-        unklare_projekte = projekt_cluster_unklar[:20]
-
+        projekt_cluster = build_project_clusters(cluster_input)
+        unklare_projekte = [x for x in projekt_cluster if x.get("confidence", 0) < 0.75][:20]
 
         fachliche_hinweis_details = build_fachliche_hinweis_details(fachliche_hinweise, rechnung_map)
         gutschrift_details = build_gutschrift_details(gutschriften, lookup_rechnungen)
@@ -3003,9 +2998,6 @@ def analyze():
                 "details": gutschrift_details,
             },
             "projekt_cluster": projekt_cluster,
-            "projekt_cluster_voll_zugeordnet": projekt_cluster_voll,
-            "projekt_cluster_teilweise_zugeordnet": projekt_cluster_teil,
-            "projekt_cluster_unklar_oder_einzeln": projekt_cluster_unklar,
             "payment": payment,
             "report_highlights": {
                 "wichtigste_faelle": wichtige_faelle
