@@ -1726,6 +1726,27 @@ def build_project_display_name(cluster):
         return kommission
 
     return "Unbekanntes Projekt"
+    
+def is_full_person_name(value):
+    s = normalize_name(value)
+    if not s:
+        return False
+
+    parts = [p for p in s.split() if p]
+    if len(parts) < 2:
+        return False
+
+    if any(re.search(r"\d", p) for p in parts):
+        return False
+
+    blacklist = {
+        "lager", "p1", "webshop", "elements", "abholung", "lieferung",
+        "innend", "aussend", "außend", "update", "kom", "kunde"
+    }
+    if any(p in blacklist for p in parts):
+        return False
+
+    return True
 
 def text_similarity(a, b):
     a = normalize_name(a)
