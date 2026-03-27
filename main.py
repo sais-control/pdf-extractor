@@ -2327,7 +2327,20 @@ def cluster_match_score(cluster, feat):
     return score, reasons
 
 def build_project_clusters(rechnungen):
+
+    # 🔧 Make / HTTP Struktur fixen
+    if isinstance(rechnungen, list) and len(rechnungen) == 1 and isinstance(rechnungen[0], dict) and "data" in rechnungen[0]:
+        data_block = rechnungen[0]["data"]
+
+        # Falls Rechnungen unter "rechnungen" liegen
+        if isinstance(data_block, dict) and "rechnungen" in data_block:
+            rechnungen = data_block["rechnungen"]
+        else:
+            # fallback → evtl. ist data_block schon Liste
+            rechnungen = data_block
+
     prepared = []
+
 
     for r in rechnungen:
         feat = extract_project_features(r)
