@@ -1763,6 +1763,72 @@ def unique_nonempty(values):
 
     return out
 
+def looks_like_company_address(value):
+    s = normalize_text_basic(value)
+    if not s:
+        return False
+
+    company_markers = [
+        "gmbh", "mbh", "ug", "gbr", "kg", "ag", "ohg",
+        "gebaeudetechnik", "haustechnik", "elektro", "sanitaer",
+        "heizung", "klima", "technik"
+    ]
+
+    return any(m in s for m in company_markers)
+
+
+def canonicalize_project_address(value):
+    s = str(value or "").strip()
+    if not s:
+        return ""
+
+    s = normalize_text_basic(s)
+
+    s = s.replace("straße", "str")
+    s = s.replace("strasse", "str")
+    s = s.replace("str.", "str")
+    s = s.replace("corn.", "cornelius")
+    s = s.replace("corn-", "cornelius-")
+    s = s.replace("corn ", "cornelius ")
+
+    s = re.sub(r"\bdeutschland\b", " ", s)
+    s = re.sub(r"\bde\b", " ", s)
+    s = re.sub(r"\bplatzhalter\s+[a-z0-9]+\b", " ", s)
+    s = re.sub(r"\bvom\s+\d{2}\.\d{2}\.\d{4}\b", " ", s)
+    s = re.sub(r"\babholung\b", " ", s)
+    s = re.sub(r"\binnend\b", " ", s)
+    s = re.sub(r"\baußend\b", " ", s)
+    s = re.sub(r"\baussend\b", " ", s)
+    s = re.sub(r"\bin\s+", " ", s)
+
+    s = re.sub(r"[^a-z0-9 ]", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+
+    return s
+
+def is_real_project_address(value):
+    s = canonicalize_project_address(value)
+    if not s:
+        return False
+
+    has_digit = bool(re.search(r"\d", s))
+    has_letters = bool(re.search(r"[a-z]", s))
+
+    if not (has_digit and has_letters):
+        return False
+
+    short_bad = {
+        "lager",
+        "p1",
+        "projekt",
+        "baustelle",
+        "abholung",
+    }
+    if s in short_bad:
+        return False
+
+    return True
+
 def text_similarity(a, b):
     a = normalize_name(a)
     b = normalize_name(b)
@@ -2261,235 +2327,228 @@ def cluster_match_score(cluster, feat):
     return score, reasons
 
 def build_project_clusters(rechnungen):
-    cluster_seq = 1
-
-    # ---------------------------------------------
-    # VORBEREITUNG
-    # ---------------------------------------------
-    rows = []
+    prepared = []
 
     for r in rechnungen:
-        rid = get_rechnung_id(r)
-        if not rid:
-            continue
-
         feat = extract_project_features(r)
+        rid = get_rechnung_id(r)
+        brutto = get_brutto_summe(r)
 
-        address_key = extract_address_key(feat["baustelle_raw"])
-        kostenstelle_key = feat["kostenstelle_norm"] if feat["kostenstelle_norm"] and not feat["kostenstelle_generisch"] else ""
-        kommission_fullname = feat["kommission_raw"].strip() if is_full_person_name(feat["kommission_raw"]) else ""
-        lager_flag = is_lager_key(feat)
+        kostenstelle_raw = str(feat.get("kostenstelle_raw") or "").strip()
+        kommission_raw = str(feat.get("kommission_raw") or "").strip()
+        baustelle_raw = str(feat.get("baustelle_raw") or "").strip()
 
-        rows.append({
+        kostenstelle_norm = normalize_code(kostenstelle_raw)
+        kommission_norm = normalize_name(kommission_raw)
+        baustelle_canon = canonicalize_project_address(baustelle_raw)
+
+        is_lager = (
+            feat.get("kostenstelle_generisch", False)
+            or kostenstelle_norm == normalize_code("P1")
+            or "lager" in normalize_text_basic(kostenstelle_raw)
+            or "lager" in normalize_text_basic(kommission_raw)
+            or "lager" in normalize_text_basic(baustelle_raw)
+        )
+
+        prepared.append({
             "rechnung": r,
             "rechnung_id": rid,
-            "brutto": get_brutto_summe(r),
+            "brutto": brutto,
             "feat": feat,
-            "address_key": address_key,
-            "kostenstelle_key": kostenstelle_key,
-            "kommission_fullname": kommission_fullname,
-            "lager_flag": lager_flag,
-            "assigned_cluster_id": None,
-            "assignment_stage": "",
+            "kostenstelle_raw": kostenstelle_raw,
+            "kostenstelle_norm": kostenstelle_norm,
+            "kommission_raw": kommission_raw,
+            "kommission_norm": kommission_norm,
+            "baustelle_raw": baustelle_raw,
+            "baustelle_canon": baustelle_canon,
+            "is_real_address": is_real_project_address(baustelle_raw),
+            "is_company_address": looks_like_company_address(baustelle_raw),
+            "is_lager": is_lager,
         })
 
-    # ---------------------------------------------
-    # CLUSTER-CONTAINER
-    # ---------------------------------------------
-    clusters = {}
-
-    def create_cluster(row, stage_label):
-        nonlocal cluster_seq
-
-        cid = f"PC_{cluster_seq:04d}"
-        cluster_seq += 1
-
-        feat = row["feat"]
-
-        clusters[cid] = {
-            "projekt_cluster_id": cid,
-            "rechnung_ids": [],
-            "summe_brutto": 0.0,
-
-            "address_key": row["address_key"],
-            "kostenstelle_keys": set(),
-            "kommission_fullnames": set(),
-            "is_lager": row["lager_flag"],
-
-            "kostenstelle_values": [],
-            "kommission_values": [],
-            "baustelle_values": [],
-            "projekt_text_values": [],
-            "match_reasons": [stage_label],
-
-            "zuordnungsart": stage_label,
+    def new_cluster(seed, bucket="voll", reason="NEUES_CLUSTER"):
+        return {
+            "rechnung_ids": [seed["rechnung_id"]],
+            "summe_brutto": seed["brutto"],
+            "rechnungen": [seed["rechnung"]],
+            "kostenstelle_values": [seed["kostenstelle_raw"]] if seed["kostenstelle_raw"] else [],
+            "kommission_values": [seed["kommission_raw"]] if seed["kommission_raw"] else [],
+            "baustelle_values": [seed["baustelle_raw"]] if seed["baustelle_raw"] else [],
+            "kostenstelle_norms": set([seed["kostenstelle_norm"]]) if seed["kostenstelle_norm"] else set(),
+            "kommission_norms": set([seed["kommission_norm"]]) if seed["kommission_norm"] else set(),
+            "baustelle_canons": set([seed["baustelle_canon"]]) if seed["baustelle_canon"] else set(),
+            "match_reasons": [reason],
+            "is_lager": seed["is_lager"],
+            "has_real_address": seed["is_real_address"],
+            "is_company_address": seed["is_company_address"],
+            "zuordnungs_bucket": bucket,
         }
 
-        assign_row_to_cluster(row, cid, stage_label)
-        return cid
+    def add_to_cluster(cluster, item, reason):
+        cluster["rechnung_ids"].append(item["rechnung_id"])
+        cluster["summe_brutto"] += item["brutto"]
+        cluster["rechnungen"].append(item["rechnung"])
 
-    def assign_row_to_cluster(row, cid, stage_label):
-        c = clusters[cid]
-        feat = row["feat"]
+        if item["kostenstelle_raw"]:
+            cluster["kostenstelle_values"].append(item["kostenstelle_raw"])
+        if item["kommission_raw"]:
+            cluster["kommission_values"].append(item["kommission_raw"])
+        if item["baustelle_raw"]:
+            cluster["baustelle_values"].append(item["baustelle_raw"])
 
-        row["assigned_cluster_id"] = cid
-        row["assignment_stage"] = stage_label
+        if item["kostenstelle_norm"]:
+            cluster["kostenstelle_norms"].add(item["kostenstelle_norm"])
+        if item["kommission_norm"]:
+            cluster["kommission_norms"].add(item["kommission_norm"])
+        if item["baustelle_canon"]:
+            cluster["baustelle_canons"].add(item["baustelle_canon"])
 
-        c["rechnung_ids"].append(row["rechnung_id"])
-        c["summe_brutto"] += row["brutto"]
+        cluster["match_reasons"].append(reason)
 
-        if row["address_key"] and not c["address_key"]:
-            c["address_key"] = row["address_key"]
+        if item["is_real_address"]:
+            cluster["has_real_address"] = True
+        if item["is_company_address"]:
+            cluster["is_company_address"] = True
 
-        if row["kostenstelle_key"]:
-            c["kostenstelle_keys"].add(row["kostenstelle_key"])
-            c["kostenstelle_values"].append(feat["kostenstelle_raw"])
+    voll_clusters = []
+    lager_cluster = None
+    orphan_items = []
 
-        if row["kommission_fullname"]:
-            c["kommission_fullnames"].add(normalize_name(row["kommission_fullname"]))
-
-        if feat["kommission_raw"]:
-            c["kommission_values"].append(feat["kommission_raw"])
-        if feat["baustelle_raw"]:
-            c["baustelle_values"].append(feat["baustelle_raw"])
-        if feat["projekt_text_raw"]:
-            c["projekt_text_values"].append(feat["projekt_text_raw"])
-
-        if stage_label not in c["match_reasons"]:
-            c["match_reasons"].append(stage_label)
-
-        if row["lager_flag"]:
-            c["is_lager"] = True
-
-    # ---------------------------------------------
-    # STUFE 1: ALLE MIT ADRESSE DIREKT NACH ADRESSE CLUSTERN
-    # ---------------------------------------------
-    address_cluster_map = {}
-    lager_cluster_id = None
-
-    for row in rows:
-        if row["lager_flag"]:
-            if lager_cluster_id is None:
-                lager_cluster_id = create_cluster(row, "LAGER_DIREKT")
+    # PHASE 1: saubere Adress- und Lager-Fälle
+    for item in prepared:
+        if item["is_lager"]:
+            if lager_cluster is None:
+                lager_cluster = new_cluster(item, bucket="teilweise", reason="LAGER_DIREKT")
             else:
-                assign_row_to_cluster(row, lager_cluster_id, "LAGER_DIREKT")
+                add_to_cluster(lager_cluster, item, "LAGER_DIREKT")
             continue
 
-        if row["address_key"]:
-            if row["address_key"] in address_cluster_map:
-                assign_row_to_cluster(row, address_cluster_map[row["address_key"]], "ADRESSE_DIREKT")
-            else:
-                cid = create_cluster(row, "ADRESSE_DIREKT")
-                address_cluster_map[row["address_key"]] = cid
-
-    # ---------------------------------------------
-    # STUFE 2: KOSTENSTELLE/ID OHNE ADRESSE
-    # Wenn eine Kostenstelle in genau EINEM Adress-Cluster vorkommt,
-    # dann diese Zeile an dieses Cluster hängen.
-    # ---------------------------------------------
-    kostenstelle_to_cluster = defaultdict(set)
-
-    for cid, c in clusters.items():
-        if c["address_key"]:
-            for k in c["kostenstelle_keys"]:
-                if k:
-                    kostenstelle_to_cluster[k].add(cid)
-
-    for row in rows:
-        if row["assigned_cluster_id"] is not None:
+        if not item["is_real_address"]:
+            orphan_items.append(item)
             continue
 
-        if row["address_key"]:
-            continue
+        matched = False
 
-        if row["kostenstelle_key"]:
-            candidates = list(kostenstelle_to_cluster.get(row["kostenstelle_key"], set()))
+        for cluster in voll_clusters:
+            if not cluster["has_real_address"]:
+                continue
+            if not item["baustelle_canon"] or not cluster["baustelle_canons"]:
+                continue
+
+            address_match = item["baustelle_canon"] in cluster["baustelle_canons"]
+
+            # Firmen-/Betriebsadresse nur mit zusätzlicher Kostenstellen-Logik zusammenführen
+            if address_match:
+                if item["is_company_address"] or cluster["is_company_address"]:
+                    if item["kostenstelle_norm"] and item["kostenstelle_norm"] in cluster["kostenstelle_norms"]:
+                        add_to_cluster(cluster, item, "ADRESSE_DIREKT_UND_KOSTENSTELLE")
+                        matched = True
+                        break
+                    elif not item["kostenstelle_norm"] and not cluster["kostenstelle_norms"]:
+                        add_to_cluster(cluster, item, "ADRESSE_DIREKT")
+                        matched = True
+                        break
+                    else:
+                        continue
+                else:
+                    add_to_cluster(cluster, item, "ADRESSE_DIREKT")
+                    matched = True
+                    break
+
+        if not matched:
+            voll_clusters.append(new_cluster(item, bucket="voll", reason="ADRESSE_DIREKT"))
+
+    # PHASE 2: adresslose / unklare Fälle nur vorsichtig nachziehen
+    teilweise_clusters = []
+    unklar_clusters = []
+
+    for item in orphan_items:
+        attached = False
+
+        # nur über exakte Kostenstelle an EIN eindeutiges Voll-Cluster hängen
+        if item["kostenstelle_norm"] and not is_generic_kostenstelle(item["kostenstelle_raw"]):
+            candidates = [
+                c for c in voll_clusters
+                if item["kostenstelle_norm"] in c["kostenstelle_norms"]
+            ]
+
             if len(candidates) == 1:
-                assign_row_to_cluster(row, candidates[0], "KOSTENSTELLE_NACHGEZOGEN")
+                add_to_cluster(candidates[0], item, "KOSTENSTELLE_NACHGEZOGEN")
+                attached = True
 
-    # ---------------------------------------------
-    # STUFE 3: VOLLSTÄNDIGER NAME OHNE ADRESSE/KOSTENSTELLE
-    # Wenn ein Vollname in genau EINEM bereits adressierten Cluster vorkommt,
-    # dann an dieses Cluster hängen.
-    # ---------------------------------------------
-    fullname_to_cluster = defaultdict(set)
-
-    for cid, c in clusters.items():
-        if c["address_key"]:
-            for n in c["kommission_fullnames"]:
-                if n:
-                    fullname_to_cluster[n].add(cid)
-
-    for row in rows:
-        if row["assigned_cluster_id"] is not None:
+        if attached:
             continue
 
-        if row["address_key"]:
-            continue
+        # voller Personenname + genau ein passendes Voll-Cluster
+        if item["kommission_raw"] and is_full_person_name(item["kommission_raw"]):
+            candidates = [
+                c for c in voll_clusters
+                if item["kommission_norm"] in c["kommission_norms"]
+            ]
 
-        if row["kostenstelle_key"]:
-            continue
-
-        if row["kommission_fullname"]:
-            nkey = normalize_name(row["kommission_fullname"])
-            candidates = list(fullname_to_cluster.get(nkey, set()))
             if len(candidates) == 1:
-                assign_row_to_cluster(row, candidates[0], "NAME_NACHGEZOGEN")
+                add_to_cluster(candidates[0], item, "KOMMISSION_NACHGEZOGEN")
+                attached = True
 
-    # ---------------------------------------------
-    # STUFE 4: RESTFÄLLE ALS EIGENE UNKLARE CLUSTER
-    # ---------------------------------------------
-    for row in rows:
-        if row["assigned_cluster_id"] is None:
-            create_cluster(row, "UNKLAR_EINZELFALL")
+        if attached:
+            continue
 
-    # ---------------------------------------------
-    # ERGEBNIS AUFBAUEN
-    # ---------------------------------------------
-    result_all = []
-    result_voll = []
-    result_teil = []
-    result_unklar = []
+        # teilweise zugeordnet: hat zumindest belastbare Kostenstelle oder echte Adresse
+        if item["kostenstelle_norm"] and not is_generic_kostenstelle(item["kostenstelle_raw"]):
+            teilweise_clusters.append(new_cluster(item, bucket="teilweise", reason="TEILWEISE_EINZEL"))
+        else:
+            unklar_clusters.append(new_cluster(item, bucket="unklar", reason="UNKLAR_EINZELFALL"))
 
-    for cid, c in clusters.items():
+    all_clusters = list(voll_clusters)
+
+    if lager_cluster is not None:
+        all_clusters.append(lager_cluster)
+
+    all_clusters.extend(teilweise_clusters)
+    all_clusters.extend(unklar_clusters)
+
+    result = []
+
+    for idx, c in enumerate(all_clusters, start=1):
         kostenstelle = pick_dominant_value(c["kostenstelle_values"])
         kommission = pick_dominant_value(c["kommission_values"])
         baustelle = pick_dominant_value(c["baustelle_values"])
 
-        if c["is_lager"]:
-            confidence = 0.95 if len(c["rechnung_ids"]) >= 2 else 0.85
-            status = "sicher"
-            projekt_name = "Lager / P1"
-            bucket = "teilweise"
-        elif baustelle:
-            confidence = 0.98 if len(c["rechnung_ids"]) >= 2 else 0.82
-            status = "sicher"
-            projekt_name = build_project_display_name({
-                "baustelle_values": c["baustelle_values"],
-                "kostenstelle_values": c["kostenstelle_values"],
-                "kommission_values": c["kommission_values"],
-                "is_lager": False,
-            })
-            if kostenstelle and kommission:
-                bucket = "voll"
-            elif kostenstelle or kommission:
-                bucket = "teilweise"
-            else:
-                bucket = "teilweise"
-        else:
-            confidence = 0.65 if kostenstelle else 0.45
-            status = "mittel" if confidence >= 0.55 else "unsicher"
-            projekt_name = build_project_display_name({
-                "baustelle_values": c["baustelle_values"],
-                "kostenstelle_values": c["kostenstelle_values"],
-                "kommission_values": c["kommission_values"],
-                "is_lager": False,
-            })
-            bucket = "unklar"
+        confidence = 0.45
 
-        item = {
-            "projekt_cluster_id": c["projekt_cluster_id"],
-            "projekt_name_report": projekt_name,
+        if c["has_real_address"]:
+            confidence += 0.25
+        if kostenstelle and not is_generic_kostenstelle(kostenstelle):
+            confidence += 0.15
+        if kommission and is_full_person_name(kommission):
+            confidence += 0.10
+        if len(c["rechnung_ids"]) >= 2:
+            confidence += 0.05
+
+        if c["zuordnungs_bucket"] == "unklar":
+            confidence = min(confidence, 0.65)
+        elif c["zuordnungs_bucket"] == "teilweise":
+            confidence = min(max(confidence, 0.70), 0.95)
+        else:
+            confidence = min(max(confidence, 0.82), 0.98)
+
+        if confidence >= 0.82:
+            status = "sicher"
+        elif confidence >= 0.60:
+            status = "mittel"
+        else:
+            status = "unsicher"
+
+        c_for_name = {
+            "baustelle_values": unique_nonempty(c["baustelle_values"]),
+            "kostenstelle_values": unique_nonempty(c["kostenstelle_values"]),
+            "kommission_values": unique_nonempty(c["kommission_values"]),
+            "is_lager": c["is_lager"],
+        }
+
+        result.append({
+            "projekt_cluster_id": f"PC_{idx:04d}",
+            "projekt_name_report": build_project_display_name(c_for_name),
             "erkannte_baustelle": baustelle,
             "erkannte_kostenstelle": kostenstelle,
             "erkannte_kommission": kommission,
@@ -2498,31 +2557,13 @@ def build_project_clusters(rechnungen):
             "confidence": round(confidence, 2),
             "status": status,
             "zugeordnete_rechnung_ids": c["rechnung_ids"],
-            "match_hinweise": sorted(unique_nonempty(c["match_reasons"])),
-            "offen_unterbestimmt": True if not (baustelle or kostenstelle or kommission) else False,
-            "zuordnungs_bucket": bucket,
-        }
+            "match_hinweise": sorted(list(set(c["match_reasons"]))),
+            "offen_unterbestimmt": False,
+            "zuordnungs_bucket": c["zuordnungs_bucket"],
+        })
 
-        result_all.append(item)
-
-        if bucket == "voll":
-            result_voll.append(item)
-        elif bucket == "teilweise":
-            result_teil.append(item)
-        else:
-            result_unklar.append(item)
-
-    result_all.sort(key=lambda x: x["projekt_summe_brutto"], reverse=True)
-    result_voll.sort(key=lambda x: x["projekt_summe_brutto"], reverse=True)
-    result_teil.sort(key=lambda x: x["projekt_summe_brutto"], reverse=True)
-    result_unklar.sort(key=lambda x: x["projekt_summe_brutto"], reverse=True)
-
-    return {
-        "alle": result_all,
-        "voll_zugeordnet": result_voll,
-        "teilweise_zugeordnet": result_teil,
-        "unklar_oder_einzeln": result_unklar,
-    }
+    result.sort(key=lambda x: x["projekt_summe_brutto"], reverse=True)
+    return result
 
 def build_hinweis_breakdown(hinweise):
     counter = Counter()
