@@ -2949,9 +2949,7 @@ def analyze():
         cluster_input = list(rechnungen)
         if historische_rechnungen:
             cluster_input.extend(historische_rechnungen)
-
-        projekt_cluster_result = build_project_clusters(cluster_input)
-
+            
         projekt_cluster = build_project_clusters(cluster_input)
         unklare_projekte = [x for x in projekt_cluster if x.get("confidence", 0) < 0.75][:20]
 
