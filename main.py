@@ -2562,7 +2562,7 @@ def build_project_clusters(rechnungen):
             "zuordnungs_bucket": c["zuordnungs_bucket"],
         })
 
-    result.sort(key=lambda x: x["projekt_summe_brutto"], reverse=True)
+    result.sort(key=lambda x: x.get("projekt_summe_brutto", 0), reverse=True)
 
 voll_zugeordnet = [x for x in result if x.get("zuordnungs_bucket") == "voll"]
 teilweise_zugeordnet = [x for x in result if x.get("zuordnungs_bucket") == "teilweise"]
