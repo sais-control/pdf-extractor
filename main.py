@@ -1748,6 +1748,21 @@ def is_full_person_name(value):
 
     return True
 
+def unique_nonempty(values):
+    out = []
+    seen = set()
+
+    for v in values:
+        s = str(v or "").strip()
+        if not s:
+            continue
+        if s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+
+    return out
+
 def text_similarity(a, b):
     a = normalize_name(a)
     b = normalize_name(b)
