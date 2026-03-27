@@ -2564,16 +2564,16 @@ def build_project_clusters(rechnungen):
 
     result.sort(key=lambda x: x.get("projekt_summe_brutto", 0), reverse=True)
 
-voll_zugeordnet = [x for x in result if x.get("zuordnungs_bucket") == "voll"]
-teilweise_zugeordnet = [x for x in result if x.get("zuordnungs_bucket") == "teilweise"]
-unklar_oder_einzeln = [x for x in result if x.get("zuordnungs_bucket") == "unklar"]
+    voll_zugeordnet = [x for x in result if x.get("zuordnungs_bucket") == "voll"]
+    teilweise_zugeordnet = [x for x in result if x.get("zuordnungs_bucket") == "teilweise"]
+    unklar_oder_einzeln = [x for x in result if x.get("zuordnungs_bucket") == "unklar"]
 
-return {
-    "alle": result,
-    "voll_zugeordnet": voll_zugeordnet,
-    "teilweise_zugeordnet": teilweise_zugeordnet,
-    "unklar_oder_einzeln": unklar_oder_einzeln,
-}
+    return {
+        "alle": result,
+        "voll_zugeordnet": voll_zugeordnet,
+        "teilweise_zugeordnet": teilweise_zugeordnet,
+        "unklar_oder_einzeln": unklar_oder_einzeln,
+    }
 
 def build_hinweis_breakdown(hinweise):
     counter = Counter()
