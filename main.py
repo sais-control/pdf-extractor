@@ -1541,18 +1541,128 @@ def normalize_name(value):
 
 def normalize_address(value):
     s = normalize_text_basic(value)
+
     repl = {
         "straße": "str",
         "strasse": "str",
         "str.": "str",
+        "str ": "str ",
         "platz": "pl",
         "allee": "all",
+        "cornelius gellert": "gellert",
+        "cornelius-gellert": "gellert",
+        "corn gellert": "gellert",
+        "corn gellertstr": "gellertstr",
+        "corn gellert str": "gellertstr",
+        "cornelius gellert str": "gellertstr",
+        "cornelius gellertstr": "gellertstr",
+        "corn gellertstraße": "gellertstr",
+        "cornelius gellertstraße": "gellertstr",
+        "corn gellert strasse": "gellertstr",
+        "cornelius gellert strasse": "gellertstr",
+        "platzhalter d": "",
+        "deutschland": "",
+        "de": "",
     }
+
+    s = s.replace(",", " ")
+    s = s.replace(".", " ")
+    s = s.replace("-", " ")
+
     for k, v in repl.items():
         s = s.replace(k, v)
+
     s = re.sub(r"[^a-z0-9 ]", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
+
     return s
+
+def extract_address_key(value):
+    s = normalize_address(value)
+    if not s:
+        return ""
+
+    tokens = s.split()
+
+    hausnr = ""
+    plz = ""
+    street_tokens = []
+
+    for t in tokens:
+        if re.fullmatch(r"\d{5}", t):
+            plz = t
+            continue
+
+        if not hausnr and re.fullmatch(r"\d+[a-z]?", t):
+            hausnr = t
+            continue
+
+        street_tokens.append(t)
+
+    street = " ".join(street_tokens).strip()
+
+    if not street:
+        return ""
+
+    if hausnr:
+        return f"{street}|{hausnr}"
+
+    if plz:
+        return f"{street}|{plz}"
+
+    return street
+
+
+def is_lager_key(feat):
+    values = [
+        str(feat.get("kostenstelle_raw") or "").strip().lower(),
+        str(feat.get("kommission_raw") or "").strip().lower(),
+        str(feat.get("baustelle_raw") or "").strip().lower(),
+        str(feat.get("projekt_text_raw") or "").strip().lower(),
+    ]
+
+    joined = " ".join(values)
+
+    if "p1" in joined:
+        return True
+    if "lager" in joined:
+        return True
+    if "lagerbestand" in joined:
+        return True
+
+    return False
+
+
+def pick_dominant_value(values):
+    cleaned = [str(v).strip() for v in values if str(v or "").strip()]
+    if not cleaned:
+        return ""
+    return Counter(cleaned).most_common(1)[0][0]
+
+
+def build_project_display_name(cluster):
+    address = pick_dominant_value(cluster.get("baustelle_values", []))
+    kostenstelle = pick_dominant_value(cluster.get("kostenstelle_values", []))
+    kommission = pick_dominant_value(cluster.get("kommission_values", []))
+
+    if cluster.get("is_lager"):
+        if kostenstelle:
+            return f"Lager / {kostenstelle}"
+        return "Lager / P1"
+
+    if address and kostenstelle and not is_generic_kostenstelle(kostenstelle):
+        return f"{address} / {kostenstelle}"
+
+    if address:
+        return address
+
+    if kostenstelle and not is_generic_kostenstelle(kostenstelle):
+        return kostenstelle
+
+    if kommission:
+        return kommission
+
+    return "Unbekanntes Projekt"
 
 def text_similarity(a, b):
     a = normalize_name(a)
@@ -2060,123 +2170,138 @@ def build_project_clusters(rechnungen):
         rid = get_rechnung_id(r)
         brutto = get_brutto_summe(r)
 
+        if not rid:
+            continue
+
+        address_key = extract_address_key(feat["baustelle_raw"])
+        kostenstelle_key = feat["kostenstelle_norm"]
+        lager_flag = is_lager_key(feat)
+
         has_any_project_data = any([
-            feat["kostenstelle_norm"],
+            address_key,
+            kostenstelle_key,
             feat["kommission_norm"],
-            feat["baustelle_norm"],
             feat["projekt_text_norm"],
+            lager_flag,
         ])
 
         if not has_any_project_data:
             continue
 
-        best_idx = None
-        best_score = 0.0
-        best_reasons = []
+        matched_cluster = None
+        match_reason = "NEUES_CLUSTER"
 
-        for idx, cluster in enumerate(clusters):
-            score, reasons = cluster_match_score(cluster, feat)
-            if score > best_score:
-                best_score = score
-                best_idx = idx
-                best_reasons = reasons
+        # 1) LAGER / P1 hat höchste Sonderpriorität
+        if lager_flag:
+            for c in clusters:
+                if c.get("is_lager"):
+                    matched_cluster = c
+                    match_reason = "LAGER_GLEICH"
+                    break
 
-        # deutlich strenger als vorher
-        match_threshold = 2.4
+        # 2) Danach harte Adress-Zusammenführung
+        if matched_cluster is None and address_key:
+            for c in clusters:
+                if c.get("address_key") and c.get("address_key") == address_key:
+                    matched_cluster = c
+                    match_reason = "ADRESSE_GLEICH"
+                    break
 
-        if best_idx is not None and best_score >= match_threshold:
-            c = clusters[best_idx]
-            c["rechnung_ids"].append(rid)
-            c["summe_brutto"] += brutto
-            c["rechnungen"].append(r)
+        # 3) Nur wenn keine klare Adresse vorhanden ist:
+        #    gleiche NICHT-generische Kostenstelle zusammenführen
+        if matched_cluster is None and not address_key and kostenstelle_key and not feat["kostenstelle_generisch"]:
+            for c in clusters:
+                if (
+                    not c.get("address_key")
+                    and c.get("kostenstelle_norm")
+                    and c.get("kostenstelle_norm") == kostenstelle_key
+                    and not c.get("kostenstelle_generisch", False)
+                ):
+                    matched_cluster = c
+                    match_reason = "KOSTENSTELLE_GLEICH"
+                    break
 
-            if feat["kostenstelle_raw"]:
-                c["kostenstelle_values"].append(feat["kostenstelle_raw"])
-            if feat["kommission_raw"]:
-                c["kommission_values"].append(feat["kommission_raw"])
-            if feat["baustelle_raw"]:
-                c["baustelle_values"].append(feat["baustelle_raw"])
-            if feat["projekt_text_raw"]:
-                c["projekt_text_values"].append(feat["projekt_text_raw"])
+        # 4) Falls immer noch nichts gefunden:
+        #    schwacher Fallback über sehr ähnliche Adresse
+        if matched_cluster is None and feat["baustelle_norm"]:
+            for c in clusters:
+                c_addr = c.get("baustelle_norm", "")
+                if c_addr:
+                    sim = text_similarity(feat["baustelle_norm"], c_addr)
+                    if sim >= 0.93:
+                        matched_cluster = c
+                        match_reason = "ADRESSE_SEHR_AEHNLICH"
+                        break
 
-            c["match_reasons"].extend(best_reasons)
-
-            # stärkste Felder pflegen
-            if (
-                feat["kostenstelle_norm"]
-                and (
-                    not c["kostenstelle_norm"]
-                    or (not feat["kostenstelle_generisch"] and c.get("kostenstelle_generisch", False))
-                )
-            ):
-                c["kostenstelle_norm"] = feat["kostenstelle_norm"]
-                c["kostenstelle_generisch"] = feat["kostenstelle_generisch"]
-
-            if feat["kommission_norm"] and not c["kommission_norm"]:
-                c["kommission_norm"] = feat["kommission_norm"]
-
-            if feat["baustelle_norm"] and not c["baustelle_norm"]:
-                c["baustelle_norm"] = feat["baustelle_norm"]
-
-            if feat["projekt_text_norm"]:
-                if not c.get("projekt_text_norm"):
-                    c["projekt_text_norm"] = feat["projekt_text_norm"]
-                else:
-                    c["projekt_text_norm"] = (c["projekt_text_norm"] + " " + feat["projekt_text_norm"]).strip()
-
-        else:
-            clusters.append({
+        if matched_cluster is None:
+            matched_cluster = {
                 "projekt_cluster_id": f"PC_{cluster_seq:04d}",
-                "rechnung_ids": [rid],
-                "summe_brutto": brutto,
-                "rechnungen": [r],
+                "rechnung_ids": [],
+                "summe_brutto": 0.0,
+                "rechnungen": [],
+                "address_key": address_key,
+                "is_lager": lager_flag,
 
-                "kostenstelle_norm": feat["kostenstelle_norm"],
+                "kostenstelle_norm": kostenstelle_key if (kostenstelle_key and not feat["kostenstelle_generisch"]) else "",
                 "kommission_norm": feat["kommission_norm"],
                 "baustelle_norm": feat["baustelle_norm"],
-                "projekt_text_norm": feat["projekt_text_norm"],
                 "kostenstelle_generisch": feat["kostenstelle_generisch"],
 
-                "kostenstelle_values": [feat["kostenstelle_raw"]] if feat["kostenstelle_raw"] else [],
-                "kommission_values": [feat["kommission_raw"]] if feat["kommission_raw"] else [],
-                "baustelle_values": [feat["baustelle_raw"]] if feat["baustelle_raw"] else [],
-                "projekt_text_values": [feat["projekt_text_raw"]] if feat["projekt_text_raw"] else [],
-                "match_reasons": ["NEUES_CLUSTER"],
-            })
+                "kostenstelle_values": [],
+                "kommission_values": [],
+                "baustelle_values": [],
+                "projekt_text_values": [],
+                "match_reasons": [],
+            }
+            clusters.append(matched_cluster)
             cluster_seq += 1
+
+        matched_cluster["rechnung_ids"].append(rid)
+        matched_cluster["summe_brutto"] += brutto
+        matched_cluster["rechnungen"].append(r)
+
+        if feat["kostenstelle_raw"]:
+            matched_cluster["kostenstelle_values"].append(feat["kostenstelle_raw"])
+        if feat["kommission_raw"]:
+            matched_cluster["kommission_values"].append(feat["kommission_raw"])
+        if feat["baustelle_raw"]:
+            matched_cluster["baustelle_values"].append(feat["baustelle_raw"])
+        if feat["projekt_text_raw"]:
+            matched_cluster["projekt_text_values"].append(feat["projekt_text_raw"])
+
+        matched_cluster["match_reasons"].append(match_reason)
+
+        # Adresse im Cluster nachziehen, wenn noch leer
+        if address_key and not matched_cluster.get("address_key"):
+            matched_cluster["address_key"] = address_key
+
+        if feat["baustelle_norm"] and not matched_cluster.get("baustelle_norm"):
+            matched_cluster["baustelle_norm"] = feat["baustelle_norm"]
+
+        # Nicht-generische Kostenstelle als Zusatz merken,
+        # aber NICHT zur Aufspaltung derselben Adresse nutzen
+        if kostenstelle_key and not feat["kostenstelle_generisch"] and not matched_cluster.get("kostenstelle_norm"):
+            matched_cluster["kostenstelle_norm"] = kostenstelle_key
+            matched_cluster["kostenstelle_generisch"] = False
+
+        if feat["kommission_norm"] and not matched_cluster.get("kommission_norm"):
+            matched_cluster["kommission_norm"] = feat["kommission_norm"]
 
     result = []
 
     for c in clusters:
-        kostenstelle = _best_text_value(c["kostenstelle_values"])
-        kommission = _best_text_value(c["kommission_values"])
-        baustelle = _best_text_value(c["baustelle_values"])
+        kostenstelle = pick_dominant_value(c["kostenstelle_values"])
+        kommission = pick_dominant_value(c["kommission_values"])
+        baustelle = pick_dominant_value(c["baustelle_values"])
 
-        confidence = 0.20
-
-        if kostenstelle and not is_generic_kostenstelle(kostenstelle):
-            confidence += 0.35
-        elif kostenstelle:
-            confidence += 0.08
-
-        if kommission:
-            confidence += 0.20
-
-        if baustelle:
-            confidence += 0.25
-
-        if len(c["rechnung_ids"]) >= 2:
-            confidence += 0.12
-        if len(c["rechnung_ids"]) >= 4:
-            confidence += 0.05
-
-        reasons_set = set(c["match_reasons"])
-        if "KOSTENSTELLE_GLEICH" in reasons_set:
-            confidence += 0.08
-        if "BAUSTELLE_GLEICH" in reasons_set:
-            confidence += 0.08
-        if "KOMMISSION_GLEICH" in reasons_set:
-            confidence += 0.06
+        if c.get("is_lager"):
+            confidence = 0.95 if len(c["rechnung_ids"]) >= 2 else 0.85
+        elif c.get("address_key"):
+            confidence = 0.98 if len(c["rechnung_ids"]) >= 2 else 0.82
+        elif kostenstelle and not is_generic_kostenstelle(kostenstelle):
+            confidence = 0.78 if len(c["rechnung_ids"]) >= 2 else 0.65
+        else:
+            confidence = 0.45
 
         confidence = min(round(confidence, 2), 0.98)
 
@@ -2198,6 +2323,12 @@ def build_project_clusters(rechnungen):
             "zugeordnete_rechnung_ids": c["rechnung_ids"],
             "match_hinweise": sorted(list(set(c["match_reasons"]))),
             "offen_unterbestimmt": True if not (kostenstelle or kommission or baustelle) else False,
+            "projekt_name_report": build_project_display_name({
+                "baustelle_values": c["baustelle_values"],
+                "kostenstelle_values": c["kostenstelle_values"],
+                "kommission_values": c["kommission_values"],
+                "is_lager": c.get("is_lager", False),
+            }),
         })
 
     result.sort(key=lambda x: x["projekt_summe_brutto"], reverse=True)
