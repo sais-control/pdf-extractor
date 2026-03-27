@@ -1582,35 +1582,98 @@ def extract_address_key(value):
     if not s:
         return ""
 
-    tokens = s.split()
+    s = f" {s} "
 
-    hausnr = ""
-    plz = ""
-    street_tokens = []
+    # störende Wörter / Vorläufe entschärfen
+    noise_patterns = [
+        r"\bdeutschland\b",
+        r"\bde\b",
+        r"\bin\b",
+        r"\binnend\b",
+        r"\baussend\b",
+        r"\baußend\b",
+        r"\bvom\b.*$",
+        r"\babholung\b.*$",
+        r"\blieferung\b.*$",
+        r"\bkom\b.*$",
+        r"\bupdate\b.*$",
+    ]
+    for p in noise_patterns:
+        s = re.sub(p, " ", s)
 
-    for t in tokens:
-        if re.fullmatch(r"\d{5}", t):
-            plz = t
-            continue
+    s = re.sub(r"\s+", " ", s).strip()
 
-        if not hausnr and re.fullmatch(r"\d+[a-z]?", t):
-            hausnr = t
-            continue
+    # bevorzugt echte Straßenmuster finden
+    street_patterns = [
+        r"([a-z0-9 ]+?\bstr\b\s+\d+[a-z]?)",
+        r"([a-z0-9 ]+?\bstraße\b\s+\d+[a-z]?)",
+        r"([a-z0-9 ]+?\bstrasse\b\s+\d+[a-z]?)",
+        r"([a-z0-9 ]+?\bweg\b\s+\d+[a-z]?)",
+        r"([a-z0-9 ]+?\ballee\b\s+\d+[a-z]?)",
+        r"([a-z0-9 ]+?\bplatz\b\s+\d+[a-z]?)",
+        r"([a-z0-9 ]+?\bgasse\b\s+\d+[a-z]?)",
+    ]
 
-        street_tokens.append(t)
+    candidate = ""
+    for pattern in street_patterns:
+        m = re.search(pattern, s)
+        if m:
+            candidate = m.group(1).strip()
+            break
 
-    street = " ".join(street_tokens).strip()
+    if not candidate:
+        # Fallback: PLZ + Ort abschneiden, aber nur relevanten Teil um Hausnummer herum nehmen
+        tokens = s.split()
+        haus_idx = None
+        for i, t in enumerate(tokens):
+            if re.fullmatch(r"\d+[a-z]?", t):
+                haus_idx = i
+                break
 
-    if not street:
-        return ""
+        if haus_idx is None:
+            return ""
 
-    if hausnr:
-        return f"{street}|{hausnr}"
+        start = max(0, haus_idx - 4)
+        end = min(len(tokens), haus_idx + 1)
+        candidate = " ".join(tokens[start:end]).strip()
+
+    candidate = re.sub(r"\s+", " ", candidate).strip()
+
+    # führende Personen-/Firmennamen vor der eigentlichen Straße abschneiden
+    street_anchor_patterns = [
+        r"(gellert ?str\s+\d+[a-z]?)",
+        r"(knuellweg\s+\d+[a-z]?)",
+        r"(wahlebachweg\s+\d+[a-z]?)",
+        r"(ludwig jahn str\s+\d+[a-z]?)",
+        r"(thoenebergstr\s+\d+[a-z]?)",
+        r"(herkulesstr\s+\d+[a-z]?)",
+        r"(korbacher str\s+\d+[a-z]?)",
+        r"(osterbergstr\s+\d+[a-z]?)",
+        r"(schillerstr\s+\d+[a-z]?)",
+        r"(moerikestr\s+\d+[a-z]?)",
+        r"(kronenstr\s+\d+[a-z]?)",
+        r"(sperbergasse\s+\d+[a-z]?)",
+        r"(cottbusser str\s+\d+[a-z]?)",
+        r"(waldeckerstr\s+\d+[a-z]?)",
+        r"(repsch\s+\d+[a-z]?)",
+        r"(im lehnhof\s+\d+[a-z]?)",
+        r"(in den weiden\s+\d+[a-z]?)",
+    ]
+
+    for pattern in street_anchor_patterns:
+        m = re.search(pattern, candidate)
+        if m:
+            candidate = m.group(1).strip()
+            break
+
+    # optionale PLZ anhängen, wenn vorhanden
+    plz_match = re.search(r"\b(\d{5})\b", s)
+    plz = plz_match.group(1) if plz_match else ""
 
     if plz:
-        return f"{street}|{plz}"
+        return f"{candidate}|{plz}"
 
-    return street
+    return candidate
 
 
 def is_lager_key(feat):
