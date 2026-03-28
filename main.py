@@ -1522,6 +1522,135 @@ GENERISCHE_KOSTENSTELLEN = {
     "SAMMEL",
 }
 
+LIEFERANTEN_TYP_STANDARD = "SONSTIGES"
+
+LIEFERANTEN_TYP_MAPPING = {
+    "GROSSHAENDLER": "MATERIAL",
+    "GROßHAENDLER": "MATERIAL",
+    "GROSSHANDEL": "MATERIAL",
+    "GROßHANDEL": "MATERIAL",
+    "FACHGROSSHANDEL": "MATERIAL",
+    "FACHGROSSHAENDLER": "MATERIAL",
+    "HERSTELLER": "MATERIAL",
+    "LIEFERANT": "MATERIAL",
+    "MATERIAL": "MATERIAL",
+
+    "SUBUNTERNEHMER": "SUBUNTERNEHMER",
+    "NACHUNTERNEHMER": "SUBUNTERNEHMER",
+    "DIENSTLEISTER": "SUBUNTERNEHMER",
+    "HANDWERKER": "SUBUNTERNEHMER",
+    "MONTAGE": "SUBUNTERNEHMER",
+    "ELEKTRIKER": "SUBUNTERNEHMER",
+    "INSTALLATEUR": "SUBUNTERNEHMER",
+
+    "SONSTIGES": "SONSTIGES",
+    "BETRIEBSKOSTEN": "SONSTIGES",
+    "FUHRPARK": "SONSTIGES",
+    "WERKZEUG": "SONSTIGES",
+    "ARBEITSKLEIDUNG": "SONSTIGES",
+    "ENTSORGUNG": "SONSTIGES",
+}
+
+def get_lieferantenregel_typ(row):
+    return str(
+        row.get("lieferantentyp")
+        or row.get("Lieferantentyp")
+        or row.get("lieferanten_typ")
+        or row.get("Lieferanten_Typ")
+        or row.get("kategorie")
+        or row.get("Kategorie")
+        or row.get("typ")
+        or row.get("Typ")
+        or ""
+    ).strip().upper()
+
+def canonical_lieferanten_typ(value):
+    raw = str(value or "").strip().upper()
+    if not raw:
+        return LIEFERANTEN_TYP_STANDARD
+
+    raw = raw.replace("Ä", "AE").replace("Ö", "OE").replace("Ü", "UE").replace("ß", "SS")
+    raw = raw.replace("-", "_").replace(" ", "_")
+
+    return LIEFERANTEN_TYP_MAPPING.get(raw, LIEFERANTEN_TYP_STANDARD)
+
+def build_lieferanten_kontext(lieferantenregeln):
+    kontext_by_lieferant_id = {}
+    kontext_by_lieferant_name = {}
+
+    for row in (lieferantenregeln or []):
+        lieferant_id = str(
+            row.get("lieferant_id")
+            or row.get("Lieferant_ID")
+            or ""
+        ).strip()
+
+        lieferant_name = str(
+            row.get("lieferant_name")
+            or row.get("Lieferant_Name")
+            or ""
+        ).strip()
+
+        lieferanten_typ_raw = get_lieferantenregel_typ(row)
+        lieferanten_typ = canonical_lieferanten_typ(lieferanten_typ_raw)
+
+        payload = {
+            "lieferant_id": lieferant_id,
+            "lieferant_name": lieferant_name,
+            "lieferanten_typ_raw": lieferanten_typ_raw,
+            "lieferanten_typ": lieferanten_typ,
+        }
+
+        if lieferant_id:
+            kontext_by_lieferant_id[lieferant_id] = payload
+
+        if lieferant_name:
+            kontext_by_lieferant_name[normalize_name(lieferant_name)] = payload
+
+    return {
+        "by_lieferant_id": kontext_by_lieferant_id,
+        "by_lieferant_name": kontext_by_lieferant_name,
+    }
+
+def get_lieferanten_typ_for_rechnung(r, lieferanten_kontext):
+    lieferanten_kontext = lieferanten_kontext or {}
+
+    by_id = lieferanten_kontext.get("by_lieferant_id", {}) or {}
+    by_name = lieferanten_kontext.get("by_lieferant_name", {}) or {}
+
+    lieferant_id = get_lieferant_id(r)
+    lieferant_name = get_lieferant_name(r)
+    lieferant_name_norm = normalize_name(lieferant_name)
+
+    if lieferant_id and lieferant_id in by_id:
+        return by_id[lieferant_id].get("lieferanten_typ", LIEFERANTEN_TYP_STANDARD)
+
+    if lieferant_name_norm and lieferant_name_norm in by_name:
+        return by_name[lieferant_name_norm].get("lieferanten_typ", LIEFERANTEN_TYP_STANDARD)
+
+    return LIEFERANTEN_TYP_STANDARD
+
+def build_lieferanten_typ_breakdown_for_rechnungen(rechnungen, lieferanten_kontext):
+    breakdown = {
+        "MATERIAL": 0.0,
+        "SUBUNTERNEHMER": 0.0,
+        "SONSTIGES": 0.0,
+    }
+
+    for r in (rechnungen or []):
+        typ = get_lieferanten_typ_for_rechnung(r, lieferanten_kontext)
+        brutto = get_brutto_summe(r)
+
+        if typ not in breakdown:
+            breakdown[typ] = 0.0
+
+        breakdown[typ] += brutto
+
+    for k in list(breakdown.keys()):
+        breakdown[k] = round(breakdown[k], 2)
+
+    return breakdown
+
 def normalize_text_basic(value):
     s = str(value or "").strip().lower()
     s = s.replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss")
@@ -2329,41 +2458,36 @@ def cluster_match_score(cluster, feat):
 def build_project_clusters(rechnungen):
     prepared = []
 
+    def clean_text(value):
+        s = normalize_text_basic(value)
+        s = s.replace("straße", "str")
+        s = s.replace("strasse", "str")
+        s = s.replace("str.", "str")
+        s = s.replace("corn.", "cornelius")
+        s = s.replace("corn-", "cornelius-")
+        s = s.replace("corn ", "cornelius ")
+        s = s.replace("deutschland", " ")
+        s = s.replace("platzhalter", " ")
+        s = s.replace("abholung", " ")
+        s = s.replace("lieferung", " ")
+        s = s.replace("innend", " ")
+        s = s.replace("aussend", " ")
+        s = s.replace("außend", " ")
+        s = s.replace("webshop", " ")
+        s = s.replace("gmbh", " ")
+        s = s.replace("gebaeudetechnik", " ")
+        s = re.sub(r"\bvom\s+\d{2}\.\d{2}\.\d{4}\b", " ", s)
+        s = re.sub(r"\b\d{6,}[-/][0-9a-z-]+\b", " ", s)
+        s = re.sub(r"[^a-z0-9 ]", " ", s)
+        s = re.sub(r"\s+", " ", s).strip()
+        return s
+
     def build_address_cluster_key(value):
         raw = str(value or "").strip()
         if not raw:
             return ""
 
-        s = normalize_text_basic(raw)
-
-        replacements = {
-            "straße": "str",
-            "strasse": "str",
-            "str.": "str",
-            "corn.": "cornelius",
-            "corn-": "cornelius-",
-            "corn ": "cornelius ",
-            "deutschland": " ",
-            "platzhalter": " ",
-            "abholung": " ",
-            "lieferung": " ",
-            "innend": " ",
-            "aussend": " ",
-            "außend": " ",
-        }
-
-        for k, v in replacements.items():
-            s = s.replace(k, v)
-
-        s = re.sub(r"\bvom\s+\d{2}\.\d{2}\.\d{4}\b", " ", s)
-        s = re.sub(r"\b\d{6,}[-/][0-9a-z-]+\b", " ", s)
-        s = re.sub(r"\bju\s*ni\b", " ", s)
-        s = re.sub(r"\bgebaeudetechnik\b", " ", s)
-        s = re.sub(r"\bgmbh\b", " ", s)
-        s = re.sub(r"\bde\b", " ", s)
-        s = re.sub(r"[^a-z0-9 ]", " ", s)
-        s = re.sub(r"\s+", " ", s).strip()
-
+        s = clean_text(raw)
         if not s:
             return ""
 
@@ -2399,13 +2523,13 @@ def build_project_clusters(rechnungen):
                 end = min(len(tokens), haus_idx + 1)
                 street = " ".join(tokens[start:end]).strip()
 
+        if not street:
+            return ""
+
         plz_match = re.search(r"\b(\d{5})\b", normalize_text_basic(raw))
         plz = plz_match.group(1) if plz_match else ""
 
         street = re.sub(r"\s+", " ", street).strip()
-
-        if not street:
-            return ""
 
         return f"{street}|{plz}" if plz else street
 
@@ -2424,8 +2548,15 @@ def build_project_clusters(rechnungen):
             return ""
         return Counter(vals).most_common(1)[0][0]
 
+    def choose_best_address(values):
+        vals = [str(v).strip() for v in values if str(v or "").strip()]
+        if not vals:
+            return ""
+        vals_sorted = sorted(vals, key=lambda x: len(x), reverse=True)
+        return vals_sorted[0]
+
     def make_display_name(cluster):
-        baustelle = best_nonempty(cluster["baustelle_values"])
+        baustelle = choose_best_address(cluster["baustelle_values"])
         kostenstelle = best_nonempty(cluster["kostenstelle_values"])
         kommission = best_nonempty(cluster["kommission_values"])
 
@@ -2445,6 +2576,82 @@ def build_project_clusters(rechnungen):
             return kommission
 
         return "Unbekanntes Projekt"
+
+    def make_cluster_signature(cluster):
+        return {
+            "address_keys": set(cluster["address_keys"]),
+            "kostenstelle_norms": set(cluster["kostenstelle_norms"]),
+            "kommission_norms": set(cluster["kommission_norms"]),
+            "is_lager": cluster["is_lager"],
+        }
+
+    def clusters_should_merge(a, b):
+        if a["is_lager"] and b["is_lager"]:
+            return True
+
+        if a["is_lager"] != b["is_lager"]:
+            return False
+
+        a_addr = set(a["address_keys"])
+        b_addr = set(b["address_keys"])
+        a_kst = set(a["kostenstelle_norms"])
+        b_kst = set(b["kostenstelle_norms"])
+        a_kom = set(a["kommission_norms"])
+        b_kom = set(b["kommission_norms"])
+
+        if a_addr and b_addr:
+            if a_addr.intersection(b_addr):
+                return True
+
+            for x in a_addr:
+                for y in b_addr:
+                    if text_similarity(x, y) >= 0.93:
+                        return True
+
+        strong_kst = [x for x in a_kst.intersection(b_kst) if x]
+        if strong_kst:
+            for x in strong_kst:
+                if not is_generic_kostenstelle(x):
+                    return True
+
+        strong_kom = a_kom.intersection(b_kom)
+        if strong_kom and (a_addr or b_addr):
+            return True
+
+        if a_addr and b_kst:
+            for x in b_kst:
+                if x and not is_generic_kostenstelle(x):
+                    joined = " ".join(list(a_addr))
+                    if x in joined:
+                        return True
+
+        if b_addr and a_kst:
+            for x in a_kst:
+                if x and not is_generic_kostenstelle(x):
+                    joined = " ".join(list(b_addr))
+                    if x in joined:
+                        return True
+
+        return False
+
+    def merge_cluster_into(target, source, reason):
+        for rid in source["rechnung_ids"]:
+            if rid not in target["rechnung_ids"]:
+                target["rechnung_ids"].append(rid)
+
+        target["rechnungen"].extend(source["rechnungen"])
+        target["summe_brutto"] += source["summe_brutto"]
+
+        target["kostenstelle_values"].extend(source["kostenstelle_values"])
+        target["kommission_values"].extend(source["kommission_values"])
+        target["baustelle_values"].extend(source["baustelle_values"])
+
+        target["address_keys"].update(source["address_keys"])
+        target["kostenstelle_norms"].update(source["kostenstelle_norms"])
+        target["kommission_norms"].update(source["kommission_norms"])
+
+        target["match_hinweise"].append(reason)
+        target["match_hinweise"].extend(source["match_hinweise"])
 
     for r in rechnungen:
         feat = extract_project_features(r)
@@ -2469,10 +2676,20 @@ def build_project_clusters(rechnungen):
         })
 
     def new_cluster(item, reason):
+        dokumenttyp = get_dokumenttyp(item["rechnung"])
+        brutto = item["brutto"]
+
+        rechnung_summe_brutto = brutto if dokumenttyp == "RECHNUNG" else 0.0
+        gutschrift_summe_brutto = brutto if dokumenttyp == "GUTSCHRIFT" else 0.0
+
         return {
             "rechnung_ids": [item["rechnung_id"]],
             "rechnungen": [item["rechnung"]],
-            "summe_brutto": item["brutto"],
+            "summe_brutto": brutto,
+            "rechnung_summe_brutto": rechnung_summe_brutto,
+            "gutschrift_summe_brutto": gutschrift_summe_brutto,
+            "anzahl_rechnungen": 1 if dokumenttyp == "RECHNUNG" else 0,
+            "anzahl_gutschriften": 1 if dokumenttyp == "GUTSCHRIFT" else 0,
             "kostenstelle_values": [item["kostenstelle_raw"]] if item["kostenstelle_raw"] else [],
             "kommission_values": [item["kommission_raw"]] if item["kommission_raw"] else [],
             "baustelle_values": [item["baustelle_raw"]] if item["baustelle_raw"] else [],
@@ -2483,10 +2700,21 @@ def build_project_clusters(rechnungen):
             "is_lager": item["is_lager"],
         }
 
+
     def add_to_cluster(cluster, item, reason):
+        dokumenttyp = get_dokumenttyp(item["rechnung"])
+        brutto = item["brutto"]
+
         cluster["rechnung_ids"].append(item["rechnung_id"])
         cluster["rechnungen"].append(item["rechnung"])
-        cluster["summe_brutto"] += item["brutto"]
+        cluster["summe_brutto"] += brutto
+
+        if dokumenttyp == "RECHNUNG":
+            cluster["rechnung_summe_brutto"] += brutto
+            cluster["anzahl_rechnungen"] += 1
+        elif dokumenttyp == "GUTSCHRIFT":
+            cluster["gutschrift_summe_brutto"] += brutto
+            cluster["anzahl_gutschriften"] += 1
 
         if item["kostenstelle_raw"]:
             cluster["kostenstelle_values"].append(item["kostenstelle_raw"])
@@ -2504,89 +2732,102 @@ def build_project_clusters(rechnungen):
 
         cluster["match_hinweise"].append(reason)
 
-    address_clusters = []
-    lager_cluster = None
-    orphan_items = []
+    clusters = []
 
-    # Phase 1: alles mit echter Baustellenadresse direkt nach Adresse clustern
     for item in prepared:
-        if item["is_lager"]:
-            if lager_cluster is None:
-                lager_cluster = new_cluster(item, "LAGER_DIREKT")
+        matched_idx = None
+        matched_reason = ""
+
+        for idx, cluster in enumerate(clusters):
+            temp_cluster = {
+                "address_keys": cluster["address_keys"],
+                "kostenstelle_norms": cluster["kostenstelle_norms"],
+                "kommission_norms": cluster["kommission_norms"],
+                "is_lager": cluster["is_lager"],
+            }
+
+            item_as_cluster = {
+                "address_keys": set([item["address_key"]]) if item["address_key"] else set(),
+                "kostenstelle_norms": set([item["kostenstelle_norm"]]) if item["kostenstelle_norm"] else set(),
+                "kommission_norms": set([item["kommission_norm"]]) if item["kommission_norm"] else set(),
+                "is_lager": item["is_lager"],
+            }
+
+            if clusters_should_merge(temp_cluster, item_as_cluster):
+                matched_idx = idx
+                if item["is_lager"]:
+                    matched_reason = "LAGER_DIREKT"
+                elif item["address_key"]:
+                    matched_reason = "ADRESSE_GLEICH"
+                elif item["kostenstelle_norm"]:
+                    matched_reason = "KOSTENSTELLE_NACHGEZOGEN"
+                elif item["kommission_norm"]:
+                    matched_reason = "KOMMISSION_NACHGEZOGEN"
+                else:
+                    matched_reason = "ZUSAMMENGEFUEHRT"
+                break
+
+        if matched_idx is None:
+            if item["is_lager"]:
+                reason = "LAGER_DIREKT"
+            elif item["address_key"]:
+                reason = "ADRESSE_GLEICH"
             else:
-                add_to_cluster(lager_cluster, item, "LAGER_DIREKT")
-            continue
-
-        if item["address_key"]:
-            matched = False
-            for cluster in address_clusters:
-                if item["address_key"] in cluster["address_keys"]:
-                    add_to_cluster(cluster, item, "ADRESSE_GLEICH")
-                    matched = True
-                    break
-
-            if not matched:
-                address_clusters.append(new_cluster(item, "ADRESSE_GLEICH"))
+                reason = "EINZELFALL"
+            clusters.append(new_cluster(item, reason))
         else:
-            orphan_items.append(item)
+            add_to_cluster(clusters[matched_idx], item, matched_reason)
 
-    # Phase 2: adresslose Fälle nur vorsichtig an bestehende Adress-Cluster hängen
-    standalone_clusters = []
+    # zweite Merge-Runde für bereits gebildete Cluster
+    changed = True
+    while changed:
+        changed = False
+        merged = []
+        used = set()
 
-    for item in orphan_items:
-        candidates = []
+        for i in range(len(clusters)):
+            if i in used:
+                continue
 
-        if item["kostenstelle_norm"] and not is_generic_kostenstelle(item["kostenstelle_raw"]):
-            for cluster in address_clusters:
-                if item["kostenstelle_norm"] in cluster["kostenstelle_norms"]:
-                    candidates.append((cluster, "KOSTENSTELLE_NACHGEZOGEN"))
+            base = clusters[i]
 
-        if not candidates and item["kommission_norm"] and is_full_person_name(item["kommission_raw"]):
-            for cluster in address_clusters:
-                if item["kommission_norm"] in cluster["kommission_norms"]:
-                    candidates.append((cluster, "KOMMISSION_NACHGEZOGEN"))
+            for j in range(i + 1, len(clusters)):
+                if j in used:
+                    continue
 
-        # nur wenn genau EIN eindeutiger Treffer existiert
-        unique_candidates = []
-        seen_ids = set()
-        for cluster, reason in candidates:
-            cid = id(cluster)
-            if cid not in seen_ids:
-                unique_candidates.append((cluster, reason))
-                seen_ids.add(cid)
+                other = clusters[j]
 
-        if len(unique_candidates) == 1:
-            cluster, reason = unique_candidates[0]
-            add_to_cluster(cluster, item, reason)
-        else:
-            standalone_clusters.append(new_cluster(item, "EINZELFALL"))
+                if clusters_should_merge(base, other):
+                    merge_cluster_into(base, other, "CLUSTER_ZUSAMMENGEFUEHRT")
+                    used.add(j)
+                    changed = True
 
-    all_clusters = list(address_clusters)
+            merged.append(base)
 
-    if lager_cluster is not None:
-        all_clusters.append(lager_cluster)
-
-    all_clusters.extend(standalone_clusters)
+        clusters = merged
 
     result = []
 
-    for idx, cluster in enumerate(all_clusters, start=1):
+    for idx, cluster in enumerate(clusters, start=1):
         kostenstelle = best_nonempty(cluster["kostenstelle_values"])
         kommission = best_nonempty(cluster["kommission_values"])
-        baustelle = best_nonempty(cluster["baustelle_values"])
+        baustelle = choose_best_address(cluster["baustelle_values"])
 
         confidence = 0.55
 
         if cluster["is_lager"]:
-            confidence = 0.78
-        elif cluster["address_keys"]:
-            confidence += 0.20
-        if kostenstelle and not is_generic_kostenstelle(kostenstelle):
-            confidence += 0.10
-        if kommission and is_full_person_name(kommission):
-            confidence += 0.08
-        if len(cluster["rechnung_ids"]) >= 2:
-            confidence += 0.07
+            confidence = 0.80
+        else:
+            if cluster["address_keys"]:
+                confidence += 0.18
+            if kostenstelle and not is_generic_kostenstelle(kostenstelle):
+                confidence += 0.10
+            if kommission and is_full_person_name(kommission):
+                confidence += 0.07
+            if len(cluster["rechnung_ids"]) >= 2:
+                confidence += 0.08
+            if len(cluster["rechnung_ids"]) >= 4:
+                confidence += 0.05
 
         confidence = min(round(confidence, 2), 0.98)
 
@@ -2604,7 +2845,12 @@ def build_project_clusters(rechnungen):
             "erkannte_kostenstelle": kostenstelle,
             "erkannte_kommission": kommission,
             "projekt_summe_brutto": round(cluster["summe_brutto"], 2),
-            "anzahl_rechnungen": len(cluster["rechnung_ids"]),
+            "rechnung_summe_brutto": round(cluster["rechnung_summe_brutto"], 2),
+            "gutschrift_summe_brutto": round(cluster["gutschrift_summe_brutto"], 2),
+            "nettoeffekt_brutto": round(cluster["summe_brutto"], 2),
+            "anzahl_rechnungen": cluster["anzahl_rechnungen"],
+            "anzahl_gutschriften": cluster["anzahl_gutschriften"],
+            "anzahl_dokumente": len(cluster["rechnung_ids"]),
             "confidence": confidence,
             "status": status,
             "zugeordnete_rechnung_ids": cluster["rechnung_ids"],
@@ -2767,6 +3013,8 @@ def build_gutschrift_details(gutschriften, lookup_rechnungen):
             "ursprungsrechnung_rechnungsnummer": get_rechnungsnummer(ursprung) if ursprung else "",
             "ursprungsrechnung_rechnungsdatum": str(get_rechnungsdatum(ursprung) or "") if ursprung else "",
             "ursprungsrechnung_brutto_summe": round(get_brutto_summe(ursprung), 2) if ursprung else 0.0,
+            "ursprungsrechnung_lieferant_name": get_lieferant_name(ursprung) if ursprung else "",
+            "ursprungsrechnung_dokumenttyp": get_dokumenttyp(ursprung) if ursprung else "",
         })
 
     details.sort(key=lambda x: abs(x["brutto_summe"]), reverse=True)
@@ -2865,6 +3113,179 @@ def build_email_summary(summary, fachlicher_breakdown, payment, top_lieferanten,
         )
 
     return " ".join(parts).strip()
+    
+def normalize_lieferant_typ(value):
+    s = normalize_text_basic(value)
+    if not s:
+        return ""
+
+    if "sub" in s and "unternehmer" in s:
+        return "SUBUNTERNEHMER"
+    if "gross" in s and "haendler" in s:
+        return "GROSSHAENDLER"
+    if "groß" in str(value or "").lower() and "händler" in str(value or "").lower():
+        return "GROSSHAENDLER"
+    if "grosshandel" in s or "großhandel" in str(value or "").lower():
+        return "GROSSHAENDLER"
+    if "hersteller" in s:
+        return "HERSTELLER"
+    if "dienst" in s:
+        return "DIENSTLEISTER"
+    if "handwerker" in s:
+        return "HANDWERKER"
+    if "sonst" in s:
+        return "SONSTIGES"
+
+    return str(value or "").strip().upper()
+
+def build_lieferanten_kontext(lieferantenregeln):
+    result = {}
+
+    for row in lieferantenregeln:
+        lieferant_id = str(
+            row.get("lieferant_id")
+            or row.get("Lieferant_ID")
+            or ""
+        ).strip()
+
+        lieferant_name = str(
+            row.get("lieferant_name")
+            or row.get("Lieferant_Name")
+            or ""
+        ).strip()
+
+        key = lieferant_id or lieferant_name
+        if not key:
+            continue
+
+        lieferant_typ = normalize_lieferant_typ(
+            row.get("lieferantentyp")
+            or row.get("Lieferantentyp")
+            or row.get("lieferanten_typ")
+            or row.get("Lieferanten_Typ")
+            or row.get("kategorie")
+            or row.get("Kategorie")
+            or ""
+        )
+
+        result[key] = {
+            "lieferant_id": lieferant_id,
+            "lieferant_name": lieferant_name or key,
+            "lieferant_typ": lieferant_typ,
+        }
+
+    return result
+
+def resolve_lieferant_typ_for_rechnung(r, lieferanten_kontext):
+    lieferant_id = str(
+        r.get("lieferant_id")
+        or r.get("Lieferant_ID")
+        or ""
+    ).strip()
+
+    lieferant_name = get_lieferant_name(r)
+
+    if lieferant_id and lieferant_id in lieferanten_kontext:
+        return lieferanten_kontext[lieferant_id].get("lieferant_typ", "")
+
+    if lieferant_name and lieferant_name in lieferanten_kontext:
+        return lieferanten_kontext[lieferant_name].get("lieferant_typ", "")
+
+    return ""
+
+def map_lieferant_typ_to_kostenblock(lieferant_typ):
+    lt = str(lieferant_typ or "").strip().upper()
+
+    if lt == "SUBUNTERNEHMER":
+        return "SUBUNTERNEHMER"
+    if lt in ("GROSSHAENDLER", "HERSTELLER"):
+        return "MATERIAL"
+    if lt in ("DIENSTLEISTER", "HANDWERKER", "SONSTIGES"):
+        return "SONSTIGES"
+
+    return "SONSTIGES"
+
+def build_projekt_cluster_report(projekt_cluster, cluster_input, lieferanten_kontext):
+    rechnung_by_id = {}
+
+    for r in cluster_input:
+        rid = get_rechnung_id(r)
+        if rid:
+            rechnung_by_id[rid] = r
+
+    result = []
+
+    for p in projekt_cluster:
+        material_summe = 0.0
+        subunternehmer_summe = 0.0
+        sonstiges_summe = 0.0
+
+        rechnung_summe_brutto = to_float_safe(p.get("rechnung_summe_brutto"))
+        gutschrift_summe_brutto = to_float_safe(p.get("gutschrift_summe_brutto"))
+        nettoeffekt_brutto = to_float_safe(p.get("nettoeffekt_brutto"))
+
+        zugeordnete_ids = p.get("zugeordnete_rechnung_ids", []) or []
+
+        for rid in zugeordnete_ids:
+            r = rechnung_by_id.get(str(rid).strip())
+            if not r:
+                continue
+
+            dokumenttyp = get_dokumenttyp(r)
+            if dokumenttyp != "RECHNUNG":
+                continue
+
+            brutto = get_brutto_summe(r)
+            lieferant_typ = resolve_lieferant_typ_for_rechnung(r, lieferanten_kontext)
+            kostenblock = map_lieferant_typ_to_kostenblock(lieferant_typ)
+
+            if kostenblock == "MATERIAL":
+                material_summe += brutto
+            elif kostenblock == "SUBUNTERNEHMER":
+                subunternehmer_summe += brutto
+            else:
+                sonstiges_summe += brutto
+
+        projekt_name = str(p.get("projekt_name_report") or "").strip()
+        erkannte_baustelle = str(p.get("erkannte_baustelle") or "").strip()
+        erkannte_kostenstelle = str(p.get("erkannte_kostenstelle") or "").strip()
+        erkannte_kommission = str(p.get("erkannte_kommission") or "").strip()
+        status = str(p.get("status") or "").strip()
+        confidence = to_float_safe(p.get("confidence"))
+
+        if confidence < 0.75:
+            if erkannte_baustelle:
+                projekt_name = erkannte_baustelle
+            elif erkannte_kostenstelle and not is_generic_kostenstelle(erkannte_kostenstelle):
+                projekt_name = erkannte_kostenstelle
+            elif erkannte_kommission and is_full_person_name(erkannte_kommission):
+                projekt_name = erkannte_kommission
+            else:
+                projekt_name = ""
+
+        result.append({
+            "projekt_name": projekt_name,
+            "erkannte_baustelle": erkannte_baustelle,
+            "erkannte_kostenstelle": erkannte_kostenstelle,
+            "erkannte_kommission": erkannte_kommission,
+            "status": status,
+            "confidence": confidence,
+            "anzahl_rechnungen": int(p.get("anzahl_rechnungen") or 0),
+            "anzahl_gutschriften": int(p.get("anzahl_gutschriften") or 0),
+            "anzahl_dokumente": int(p.get("anzahl_dokumente") or 0),
+            "rechnung_summe_brutto": round(rechnung_summe_brutto, 2),
+            "gutschrift_summe_brutto": round(gutschrift_summe_brutto, 2),
+            "nettoeffekt_brutto": round(nettoeffekt_brutto, 2),
+            "kostenstruktur": {
+                "material_brutto": round(material_summe, 2),
+                "subunternehmer_brutto": round(subunternehmer_summe, 2),
+                "sonstiges_brutto": round(sonstiges_summe, 2),
+            },
+            "zugeordnete_rechnung_ids": zugeordnete_ids,
+        })
+
+    result.sort(key=lambda x: x.get("nettoeffekt_brutto", 0), reverse=True)
+    return result
 
 @app.route("/analyze", methods=["POST"])
 def analyze():
@@ -2878,8 +3299,10 @@ def analyze():
         rechnungen = data.get("rechnungen", []) or []
         hinweise = data.get("hinweise", []) or []
         historische_rechnungen = data.get("historische_rechnungen", []) or []
+        lieferantenregeln = data.get("lieferantenregeln", []) or []
 
         betriebskontext = data.get("betriebskontext", {}) or {}
+
         if "kommission_pruefen" not in betriebskontext:
             betriebskontext["kommission_pruefen"] = True
 
@@ -2893,6 +3316,7 @@ def analyze():
                 rechnung_map[rid] = r
 
         lookup_rechnungen = list(rechnungen) + list(historische_rechnungen)
+        lieferanten_kontext = build_lieferanten_kontext(lieferantenregeln)
 
         # Hinweise klassifizieren
         fachliche_hinweise = []
@@ -2949,8 +3373,13 @@ def analyze():
         cluster_input = list(rechnungen)
         if historische_rechnungen:
             cluster_input.extend(historische_rechnungen)
-            
+
         projekt_cluster = build_project_clusters(cluster_input)
+        projekt_cluster_report = build_projekt_cluster_report(
+            projekt_cluster=projekt_cluster,
+            cluster_input=cluster_input,
+            lieferanten_kontext=lieferanten_kontext
+        )
         unklare_projekte = [x for x in projekt_cluster if x.get("confidence", 0) < 0.75][:20]
 
         fachliche_hinweis_details = build_fachliche_hinweis_details(fachliche_hinweise, rechnung_map)
@@ -2996,6 +3425,15 @@ def analyze():
                 "details": gutschrift_details,
             },
             "projekt_cluster": projekt_cluster,
+            "projekt_cluster_report": projekt_cluster_report,
+            "projekt_report_meta": {
+                "anzahl_projekte": len(projekt_cluster_report),
+                "top_3_nach_nettoeffekt_brutto": projekt_cluster_report[:3]
+            },
+            "lieferanten_kontext": {
+                "anzahl": len(lieferanten_kontext),
+                "eintraege": list(lieferanten_kontext.values())
+            },
             "payment": payment,
             "report_highlights": {
                 "wichtigste_faelle": wichtige_faelle
@@ -3004,6 +3442,7 @@ def analyze():
             "optional_details": {
                 "fachliche_hinweise_details": fachliche_hinweis_details[:25],
                 "unklare_projektzuordnungen": unklare_projekte,
+                "projekt_cluster_report_top10": projekt_cluster_report[:10],
             },
             "internal_diagnostics": {
                 "technische_hinweise_anzahl": len(technische_hinweise),
