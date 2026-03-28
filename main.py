@@ -2115,6 +2115,37 @@ def extract_project_features(r):
         "projekt_text_norm": normalize_name(projekt_text_raw),
         "kostenstelle_generisch": is_generic_kostenstelle(kostenstelle_raw),
     }
+    
+def canonical_lieferanten_kategorie(value):
+    s = str(value or "").strip().upper()
+
+    if not s:
+        return "SONSTIGES"
+
+    mapping = {
+        "GROSSHANDEL": "GROSSHANDEL",
+        "GROSSHANDEL": "GROSSHANDEL",
+        "HANDEL": "GROSSHANDEL",
+        "HANDEL_ALLGEMEIN": "GROSSHANDEL",
+
+        "SUBUNTERNEHMER": "SUBUNTERNEHMER",
+        "SUB": "SUBUNTERNEHMER",
+
+        "DIENSTLEISTER": "DIENSTLEISTER",
+        "SERVICE": "DIENSTLEISTER",
+
+        "HERSTELLER": "HERSTELLER",
+
+        "FIXKOSTEN": "FIXKOSTEN",
+
+        "WERKSTATT": "WERKSTATT",
+
+        "ARBEITSKLEIDUNG": "ARBEITSKLEIDUNG",
+
+        "SONSTIGES": "SONSTIGES",
+    }
+
+    return mapping.get(s, s)
 
 def build_lieferanten_kontext_map(lieferanten_kontext):
     result = {}
@@ -2917,19 +2948,39 @@ def analyze():
     try:
         data = request.get_json() or {}
 
-        mode = data.get("mode", "wochen_report")
-        betrieb_id = data.get("betrieb_id")
-        zeitraum = data.get("zeitraum", {}) or {}
+        # === META / INPUT MAPPING (angepasst an dein Make JSON) ===
+        meta = data.get("meta", {}) or {}
 
+        mode = (
+            meta.get("report_type")
+            or data.get("mode")
+            or "wochen_report"
+        )
+
+        betrieb_id = (
+            meta.get("betrieb_id")
+            or data.get("betrieb_id")
+            or ""
+        )
+
+        zeitraum = {
+            "start": meta.get("zeitraum_start") or "",
+            "ende": meta.get("zeitraum_ende") or "",
+        }
+
+        # === HAUPTDATEN ===
         rechnungen = data.get("rechnungen", []) or []
         hinweise = data.get("hinweise", []) or []
         historische_rechnungen = data.get("historische_rechnungen", []) or []
+
+        # === KONTEXT ===
+        betriebskontext = data.get("betriebskontext", {}) or {}
         lieferanten_kontext = data.get("lieferanten_kontext", []) or []
 
-        betriebskontext = data.get("betriebskontext", {}) or {}
         if "kommission_pruefen" not in betriebskontext:
             betriebskontext["kommission_pruefen"] = True
 
+        # === DATUM PARSING ===
         zeitraum_start = parse_date_safe(zeitraum.get("start"))
         zeitraum_ende = parse_date_safe(zeitraum.get("ende"))
 
