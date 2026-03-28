@@ -1834,6 +1834,13 @@ def get_rechnungsnummer(r):
         or r.get("Rechnungsnummer")
         or ""
     ).strip()
+    
+def get_dokumenttyp(r):
+    return str(
+        r.get("dokumenttyp")
+        or r.get("Dokumenttyp")
+        or ""
+    ).strip().upper()
 
 def get_lieferant_name(r):
     return str(
