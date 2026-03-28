@@ -1458,7 +1458,7 @@ def extract_pdf():
         }), 200
         
 # ============================================================
-# ANALYZE HELPERS / REPORT LOGIK V2
+# ANALYZE HELPERS / REPORT LOGIK V3
 # ============================================================
 
 KANON_HINWEIS_TYPEN = [
@@ -1499,6 +1499,8 @@ FACHLICHE_HINWEISE_BASIS = {
     "DOPPELTE_POSITION",
     "MWST_UNPLAUSIBEL",
     "KONTO_ABWEICHUNG",
+    "KOMMISSION_FEHLT",
+    "KOMMISSION_UNKLAR",
 }
 
 TECHNISCHE_HINWEISE_BASIS = {
@@ -1512,6 +1514,7 @@ TECHNISCHE_HINWEISE_BASIS = {
     "LIEFERANT_AUTO_ERSTELLT",
     "SKONTO_ERKANNT",
     "GEBUEHR_ERKANNT",
+    "GUTSCHRIFT_ERKANNT",
 }
 
 GENERISCHE_KOSTENSTELLEN = {
@@ -1522,138 +1525,31 @@ GENERISCHE_KOSTENSTELLEN = {
     "SAMMEL",
 }
 
-LIEFERANTEN_TYP_STANDARD = "SONSTIGES"
-
 LIEFERANTEN_TYP_MAPPING = {
-    "GROSSHAENDLER": "MATERIAL",
-    "GROßHAENDLER": "MATERIAL",
-    "GROSSHANDEL": "MATERIAL",
-    "GROßHANDEL": "MATERIAL",
-    "FACHGROSSHANDEL": "MATERIAL",
-    "FACHGROSSHAENDLER": "MATERIAL",
-    "HERSTELLER": "MATERIAL",
-    "LIEFERANT": "MATERIAL",
-    "MATERIAL": "MATERIAL",
-
-    "SUBUNTERNEHMER": "SUBUNTERNEHMER",
-    "NACHUNTERNEHMER": "SUBUNTERNEHMER",
-    "DIENSTLEISTER": "SUBUNTERNEHMER",
-    "HANDWERKER": "SUBUNTERNEHMER",
-    "MONTAGE": "SUBUNTERNEHMER",
-    "ELEKTRIKER": "SUBUNTERNEHMER",
-    "INSTALLATEUR": "SUBUNTERNEHMER",
-
-    "SONSTIGES": "SONSTIGES",
-    "BETRIEBSKOSTEN": "SONSTIGES",
-    "FUHRPARK": "SONSTIGES",
-    "WERKZEUG": "SONSTIGES",
-    "ARBEITSKLEIDUNG": "SONSTIGES",
-    "ENTSORGUNG": "SONSTIGES",
+    "GROSSHAENDLER": "material",
+    "GROSSHÄNDLER": "material",
+    "GROSSHANDEL": "material",
+    "FACHGROSSHANDEL": "material",
+    "HERSTELLER": "material",
+    "LIEFERANT": "material",
+    "MATERIAL": "material",
+    "SUBUNTERNEHMER": "subunternehmer",
+    "NACHUNTERNEHMER": "subunternehmer",
+    "DIENSTLEISTER": "subunternehmer",
+    "HANDWERKER": "subunternehmer",
+    "ELEKTRIKER": "subunternehmer",
+    "MONTEUR": "subunternehmer",
+    "SONSTIGES": "sonstiges",
+    "FUHRPARK": "sonstiges",
+    "MIETE": "sonstiges",
+    "TRANSPORT": "sonstiges",
+    "ENTSORGUNG": "sonstiges",
 }
-
-def get_lieferantenregel_typ(row):
-    return str(
-        row.get("lieferantentyp")
-        or row.get("Lieferantentyp")
-        or row.get("lieferanten_typ")
-        or row.get("Lieferanten_Typ")
-        or row.get("kategorie")
-        or row.get("Kategorie")
-        or row.get("typ")
-        or row.get("Typ")
-        or ""
-    ).strip().upper()
-
-def canonical_lieferanten_typ(value):
-    raw = str(value or "").strip().upper()
-    if not raw:
-        return LIEFERANTEN_TYP_STANDARD
-
-    raw = raw.replace("Ä", "AE").replace("Ö", "OE").replace("Ü", "UE").replace("ß", "SS")
-    raw = raw.replace("-", "_").replace(" ", "_")
-
-    return LIEFERANTEN_TYP_MAPPING.get(raw, LIEFERANTEN_TYP_STANDARD)
-
-def build_lieferanten_kontext(lieferantenregeln):
-    kontext_by_lieferant_id = {}
-    kontext_by_lieferant_name = {}
-
-    for row in (lieferantenregeln or []):
-        lieferant_id = str(
-            row.get("lieferant_id")
-            or row.get("Lieferant_ID")
-            or ""
-        ).strip()
-
-        lieferant_name = str(
-            row.get("lieferant_name")
-            or row.get("Lieferant_Name")
-            or ""
-        ).strip()
-
-        lieferanten_typ_raw = get_lieferantenregel_typ(row)
-        lieferanten_typ = canonical_lieferanten_typ(lieferanten_typ_raw)
-
-        payload = {
-            "lieferant_id": lieferant_id,
-            "lieferant_name": lieferant_name,
-            "lieferanten_typ_raw": lieferanten_typ_raw,
-            "lieferanten_typ": lieferanten_typ,
-        }
-
-        if lieferant_id:
-            kontext_by_lieferant_id[lieferant_id] = payload
-
-        if lieferant_name:
-            kontext_by_lieferant_name[normalize_name(lieferant_name)] = payload
-
-    return {
-        "by_lieferant_id": kontext_by_lieferant_id,
-        "by_lieferant_name": kontext_by_lieferant_name,
-    }
-
-def get_lieferanten_typ_for_rechnung(r, lieferanten_kontext):
-    lieferanten_kontext = lieferanten_kontext or {}
-
-    by_id = lieferanten_kontext.get("by_lieferant_id", {}) or {}
-    by_name = lieferanten_kontext.get("by_lieferant_name", {}) or {}
-
-    lieferant_id = get_lieferant_id(r)
-    lieferant_name = get_lieferant_name(r)
-    lieferant_name_norm = normalize_name(lieferant_name)
-
-    if lieferant_id and lieferant_id in by_id:
-        return by_id[lieferant_id].get("lieferanten_typ", LIEFERANTEN_TYP_STANDARD)
-
-    if lieferant_name_norm and lieferant_name_norm in by_name:
-        return by_name[lieferant_name_norm].get("lieferanten_typ", LIEFERANTEN_TYP_STANDARD)
-
-    return LIEFERANTEN_TYP_STANDARD
-
-def build_lieferanten_typ_breakdown_for_rechnungen(rechnungen, lieferanten_kontext):
-    breakdown = {
-        "MATERIAL": 0.0,
-        "SUBUNTERNEHMER": 0.0,
-        "SONSTIGES": 0.0,
-    }
-
-    for r in (rechnungen or []):
-        typ = get_lieferanten_typ_for_rechnung(r, lieferanten_kontext)
-        brutto = get_brutto_summe(r)
-
-        if typ not in breakdown:
-            breakdown[typ] = 0.0
-
-        breakdown[typ] += brutto
-
-    for k in list(breakdown.keys()):
-        breakdown[k] = round(breakdown[k], 2)
-
-    return breakdown
 
 def normalize_text_basic(value):
     s = str(value or "").strip().lower()
     s = s.replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss")
+    s = s.replace("\u00a0", " ")
     s = re.sub(r"\s+", " ", s)
     return s.strip()
 
@@ -1670,12 +1566,13 @@ def normalize_name(value):
 
 def normalize_address(value):
     s = normalize_text_basic(value)
+    if not s:
+        return ""
 
-    repl = {
+    replacements = {
         "straße": "str",
         "strasse": "str",
         "str.": "str",
-        "str ": "str ",
         "platz": "pl",
         "allee": "all",
         "cornelius gellert": "gellert",
@@ -1689,7 +1586,6 @@ def normalize_address(value):
         "cornelius gellertstraße": "gellertstr",
         "corn gellert strasse": "gellertstr",
         "cornelius gellert strasse": "gellertstr",
-        "platzhalter d": "",
         "deutschland": "",
         "de": "",
     }
@@ -1698,26 +1594,22 @@ def normalize_address(value):
     s = s.replace(".", " ")
     s = s.replace("-", " ")
 
-    for k, v in repl.items():
+    for k, v in replacements.items():
         s = s.replace(k, v)
 
     s = re.sub(r"[^a-z0-9 ]", " ", s)
     s = re.sub(r"\s+", " ", s).strip()
-
     return s
 
-def extract_address_key(value):
+def normalize_address_key(value):
     s = normalize_address(value)
     if not s:
         return ""
 
     s = f" {s} "
-
-    # störende Wörter / Vorläufe entschärfen
     noise_patterns = [
         r"\bdeutschland\b",
         r"\bde\b",
-        r"\bin\b",
         r"\binnend\b",
         r"\baussend\b",
         r"\baußend\b",
@@ -1726,21 +1618,24 @@ def extract_address_key(value):
         r"\blieferung\b.*$",
         r"\bkom\b.*$",
         r"\bupdate\b.*$",
+        r"\bgebaeudetechnik\b",
+        r"\bgmbh\b",
     ]
     for p in noise_patterns:
         s = re.sub(p, " ", s)
 
     s = re.sub(r"\s+", " ", s).strip()
 
-    # bevorzugt echte Straßenmuster finden
     street_patterns = [
         r"([a-z0-9 ]+?\bstr\b\s+\d+[a-z]?)",
-        r"([a-z0-9 ]+?\bstraße\b\s+\d+[a-z]?)",
-        r"([a-z0-9 ]+?\bstrasse\b\s+\d+[a-z]?)",
         r"([a-z0-9 ]+?\bweg\b\s+\d+[a-z]?)",
         r"([a-z0-9 ]+?\ballee\b\s+\d+[a-z]?)",
         r"([a-z0-9 ]+?\bplatz\b\s+\d+[a-z]?)",
         r"([a-z0-9 ]+?\bgasse\b\s+\d+[a-z]?)",
+        r"([a-z0-9 ]+?\blehnhof\b\s+\d+[a-z]?)",
+        r"([a-z0-9 ]+?\bweiden\b\s+\d+[a-z]?)",
+        r"([a-z0-9 ]+?\brepsch\b\s+\d+[a-z]?)",
+        r"([a-z0-9 ]+?\btrift\b\s+\d+[a-z]?)",
     ]
 
     candidate = ""
@@ -1751,7 +1646,6 @@ def extract_address_key(value):
             break
 
     if not candidate:
-        # Fallback: PLZ + Ort abschneiden, aber nur relevanten Teil um Hausnummer herum nehmen
         tokens = s.split()
         haus_idx = None
         for i, t in enumerate(tokens):
@@ -1768,96 +1662,29 @@ def extract_address_key(value):
 
     candidate = re.sub(r"\s+", " ", candidate).strip()
 
-    # führende Personen-/Firmennamen vor der eigentlichen Straße abschneiden
-    street_anchor_patterns = [
-        r"(gellert ?str\s+\d+[a-z]?)",
-        r"(knuellweg\s+\d+[a-z]?)",
-        r"(wahlebachweg\s+\d+[a-z]?)",
-        r"(ludwig jahn str\s+\d+[a-z]?)",
-        r"(thoenebergstr\s+\d+[a-z]?)",
-        r"(herkulesstr\s+\d+[a-z]?)",
-        r"(korbacher str\s+\d+[a-z]?)",
-        r"(osterbergstr\s+\d+[a-z]?)",
-        r"(schillerstr\s+\d+[a-z]?)",
-        r"(moerikestr\s+\d+[a-z]?)",
-        r"(kronenstr\s+\d+[a-z]?)",
-        r"(sperbergasse\s+\d+[a-z]?)",
-        r"(cottbusser str\s+\d+[a-z]?)",
-        r"(waldeckerstr\s+\d+[a-z]?)",
-        r"(repsch\s+\d+[a-z]?)",
-        r"(im lehnhof\s+\d+[a-z]?)",
-        r"(in den weiden\s+\d+[a-z]?)",
-    ]
-
-    for pattern in street_anchor_patterns:
-        m = re.search(pattern, candidate)
-        if m:
-            candidate = m.group(1).strip()
-            break
-
-    # optionale PLZ anhängen, wenn vorhanden
     plz_match = re.search(r"\b(\d{5})\b", s)
     plz = plz_match.group(1) if plz_match else ""
 
-    if plz:
-        return f"{candidate}|{plz}"
+    return f"{candidate}|{plz}" if plz else candidate
 
-    return candidate
-
-
-def is_lager_key(feat):
-    values = [
-        str(feat.get("kostenstelle_raw") or "").strip().lower(),
-        str(feat.get("kommission_raw") or "").strip().lower(),
-        str(feat.get("baustelle_raw") or "").strip().lower(),
-        str(feat.get("projekt_text_raw") or "").strip().lower(),
-    ]
-
-    joined = " ".join(values)
-
-    if "p1" in joined:
-        return True
-    if "lager" in joined:
-        return True
-    if "lagerbestand" in joined:
-        return True
-
-    return False
-
-
-def pick_dominant_value(values):
-    cleaned = [str(v).strip() for v in values if str(v or "").strip()]
-    if not cleaned:
-        return ""
-    return Counter(cleaned).most_common(1)[0][0]
-
-
-def build_project_display_name(cluster):
-    address = pick_dominant_value(cluster.get("baustelle_values", []))
-    kostenstelle = pick_dominant_value(cluster.get("kostenstelle_values", []))
-    kommission = pick_dominant_value(cluster.get("kommission_values", []))
-
-    if cluster.get("is_lager"):
-        if kostenstelle:
-            return f"Lager / {kostenstelle}"
-        return "Lager / P1"
-
-    if address and kostenstelle and not is_generic_kostenstelle(kostenstelle):
-        return f"{address} / {kostenstelle}"
-
-    if address:
-        return address
-
-    if kostenstelle and not is_generic_kostenstelle(kostenstelle):
-        return kostenstelle
-
-    if kommission:
-        return kommission
-
-    return "Unbekanntes Projekt"
-    
-def is_full_person_name(value):
+def normalize_person_name_for_match(value):
     s = normalize_name(value)
+    if not s:
+        return ""
+
+    blacklist = {
+        "lager", "webshop", "elements", "abholung", "lieferung",
+        "innend", "aussend", "außend", "kunde", "projekt", "baustelle"
+    }
+
+    parts = [p for p in s.split() if p and p not in blacklist and not re.search(r"\d", p)]
+    if not parts:
+        return ""
+
+    return " ".join(parts)
+
+def is_full_person_name(value):
+    s = normalize_person_name_for_match(value)
     if not s:
         return False
 
@@ -1868,29 +1695,7 @@ def is_full_person_name(value):
     if any(re.search(r"\d", p) for p in parts):
         return False
 
-    blacklist = {
-        "lager", "p1", "webshop", "elements", "abholung", "lieferung",
-        "innend", "aussend", "außend", "update", "kom", "kunde"
-    }
-    if any(p in blacklist for p in parts):
-        return False
-
     return True
-
-def unique_nonempty(values):
-    out = []
-    seen = set()
-
-    for v in values:
-        s = str(v or "").strip()
-        if not s:
-            continue
-        if s in seen:
-            continue
-        seen.add(s)
-        out.append(s)
-
-    return out
 
 def looks_like_company_address(value):
     s = normalize_text_basic(value)
@@ -1902,61 +1707,7 @@ def looks_like_company_address(value):
         "gebaeudetechnik", "haustechnik", "elektro", "sanitaer",
         "heizung", "klima", "technik"
     ]
-
     return any(m in s for m in company_markers)
-
-
-def canonicalize_project_address(value):
-    s = str(value or "").strip()
-    if not s:
-        return ""
-
-    s = normalize_text_basic(s)
-
-    s = s.replace("straße", "str")
-    s = s.replace("strasse", "str")
-    s = s.replace("str.", "str")
-    s = s.replace("corn.", "cornelius")
-    s = s.replace("corn-", "cornelius-")
-    s = s.replace("corn ", "cornelius ")
-
-    s = re.sub(r"\bdeutschland\b", " ", s)
-    s = re.sub(r"\bde\b", " ", s)
-    s = re.sub(r"\bplatzhalter\s+[a-z0-9]+\b", " ", s)
-    s = re.sub(r"\bvom\s+\d{2}\.\d{2}\.\d{4}\b", " ", s)
-    s = re.sub(r"\babholung\b", " ", s)
-    s = re.sub(r"\binnend\b", " ", s)
-    s = re.sub(r"\baußend\b", " ", s)
-    s = re.sub(r"\baussend\b", " ", s)
-    s = re.sub(r"\bin\s+", " ", s)
-
-    s = re.sub(r"[^a-z0-9 ]", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-
-    return s
-
-def is_real_project_address(value):
-    s = canonicalize_project_address(value)
-    if not s:
-        return False
-
-    has_digit = bool(re.search(r"\d", s))
-    has_letters = bool(re.search(r"[a-z]", s))
-
-    if not (has_digit and has_letters):
-        return False
-
-    short_bad = {
-        "lager",
-        "p1",
-        "projekt",
-        "baustelle",
-        "abholung",
-    }
-    if s in short_bad:
-        return False
-
-    return True
 
 def text_similarity(a, b):
     a = normalize_name(a)
@@ -1968,16 +1719,24 @@ def text_similarity(a, b):
 def to_float_safe(value):
     if value is None:
         return 0.0
+
     if isinstance(value, (int, float)):
-        return float(value)
+        try:
+            return float(value)
+        except:
+            return 0.0
 
     s = str(value).strip()
     if not s:
         return 0.0
 
-    s = s.replace("€", "").replace("%", "").replace(" ", "")
-    s = s.replace("\u00a0", "")
-    s = s.replace(".", "").replace(",", ".")
+    s = s.replace("€", "").replace("%", "").replace(" ", "").replace("\u00a0", "")
+
+    if "," in s and "." in s:
+        s = s.replace(".", "").replace(",", ".")
+    elif "," in s:
+        s = s.replace(",", ".")
+
     s = re.sub(r"[^0-9\.\-]", "", s)
 
     if not s or s in ("-", ".", "-.", ".-"):
@@ -2002,7 +1761,6 @@ def parse_date_safe(value):
     if not s:
         return None
 
-    # ISO mit Zeit
     try:
         return datetime.fromisoformat(s.replace("Z", "+00:00")).date()
     except:
@@ -2051,6 +1809,16 @@ def canonical_dokumenttyp(value):
         return "GUTSCHRIFT"
     return "RECHNUNG"
 
+def canonical_lieferant_typ(value):
+    s = str(value or "").strip().upper()
+    if not s:
+        return ""
+    return s
+
+def map_lieferant_typ_to_kategorie(value):
+    s = canonical_lieferant_typ(value)
+    return LIEFERANTEN_TYP_MAPPING.get(s, "sonstiges")
+
 def get_rechnung_id(r):
     return str(
         r.get("rechnung_id")
@@ -2085,14 +1853,39 @@ def get_lieferant_id(r):
         or get_lieferant_name(r)
     ).strip()
 
-def get_dokumenttyp(r):
-    return canonical_dokumenttyp(
-        r.get("dokumenttyp")
-        or r.get("Dokumenten_Typ")
-        or r.get("Dokumententyp")
-        or r.get("Dokument_Typ")
+def get_lieferant_typ_from_rechnung(r):
+    return canonical_lieferant_typ(
+        r.get("lieferant_typ")
+        or r.get("Lieferant_Typ")
+        or r.get("lieferanten_typ")
+        or r.get("Lieferanten_Typ")
+        or r.get("kategorie")
+        or r.get("Kategorie")
         or ""
     )
+
+def get_lieferant_typ_from_kontext_map(r, lieferanten_kontext_map):
+    lid = get_lieferant_id(r)
+    lname = get_lieferant_name(r)
+
+    if lid and lid in lieferanten_kontext_map:
+        return canonical_lieferant_typ(lieferanten_kontext_map[lid].get("lieferant_typ"))
+
+    lname_norm = normalize_name(lname)
+    for _, entry in lieferanten_kontext_map.items():
+        if normalize_name(entry.get("lieferant_name")) == lname_norm:
+            return canonical_lieferant_typ(entry.get("lieferant_typ"))
+
+    return ""
+
+def get_lieferant_kategorie(r, lieferanten_kontext_map=None):
+    lieferanten_kontext_map = lieferanten_kontext_map or {}
+
+    typ = get_lieferant_typ_from_kontext_map(r, lieferanten_kontext_map)
+    if not typ:
+        typ = get_lieferant_typ_from_rechnung(r)
+
+    return map_lieferant_typ_to_kategorie(typ)
 
 def get_pruefung_status(r):
     return canonical_pruefung_status(
@@ -2226,11 +2019,32 @@ def is_generic_kostenstelle(value):
     if not raw:
         return False
     normed = normalize_code(raw)
+    canon_generisch = {normalize_code(x) for x in GENERISCHE_KOSTENSTELLEN}
     if raw in GENERISCHE_KOSTENSTELLEN:
         return True
-    if normed in {normalize_code(x) for x in GENERISCHE_KOSTENSTELLEN}:
+    if normed in canon_generisch:
         return True
     return False
+
+def choose_best_value(values):
+    values = [str(v).strip() for v in values if str(v or "").strip()]
+    if not values:
+        return ""
+    c = Counter(values)
+    return c.most_common(1)[0][0]
+
+def unique_nonempty(values):
+    out = []
+    seen = set()
+    for v in values:
+        s = str(v or "").strip()
+        if not s:
+            continue
+        if s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
 
 def determine_hinweis_klasse(h, rechnung_map, betriebskontext=None):
     betriebskontext = betriebskontext or {}
@@ -2272,13 +2086,6 @@ def determine_hinweis_klasse(h, rechnung_map, betriebskontext=None):
 
     return "TECHNISCH"
 
-def choose_best_value(values):
-    values = [str(v).strip() for v in values if str(v or "").strip()]
-    if not values:
-        return ""
-    c = Counter(values)
-    return c.most_common(1)[0][0]
-
 def extract_project_features(r):
     kostenstelle = r.get("kostenstelle") or r.get("Kostenstelle") or ""
     kommission = r.get("kommission") or r.get("Kommission") or ""
@@ -2301,517 +2108,302 @@ def extract_project_features(r):
         "kommission_raw": kommission_raw,
         "baustelle_raw": baustelle_raw,
         "projekt_text_raw": projekt_text_raw,
-
         "kostenstelle_norm": normalize_code(kostenstelle_raw),
-        "kommission_norm": normalize_name(kommission_raw),
+        "kommission_norm": normalize_person_name_for_match(kommission_raw),
         "baustelle_norm": normalize_address(baustelle_raw),
+        "address_key": normalize_address_key(baustelle_raw),
         "projekt_text_norm": normalize_name(projekt_text_raw),
-
         "kostenstelle_generisch": is_generic_kostenstelle(kostenstelle_raw),
     }
 
-def _contains_token(text_norm, token_norm):
-    if not text_norm or not token_norm:
-        return False
-    return token_norm in text_norm
+def build_lieferanten_kontext_map(lieferanten_kontext):
+    result = {}
 
-def _best_text_value(values):
-    values = [str(v).strip() for v in values if str(v or "").strip()]
-    if not values:
-        return ""
-    c = Counter(values)
-    return c.most_common(1)[0][0]
+    for item in (lieferanten_kontext or []):
+        lieferant_id = str(
+            item.get("lieferant_id")
+            or item.get("Lieferant_ID")
+            or ""
+        ).strip()
 
-def cluster_match_score(cluster, feat):
-    score = 0.0
-    reasons = []
+        lieferant_name = str(
+            item.get("lieferant_name")
+            or item.get("Lieferant_Name")
+            or ""
+        ).strip()
 
-    feat_has_k = bool(feat["kostenstelle_norm"])
-    feat_has_c = bool(feat["kommission_norm"])
-    feat_has_b = bool(feat["baustelle_norm"])
-    feat_has_t = bool(feat["projekt_text_norm"])
+        lieferant_typ = str(
+            item.get("lieferant_typ")
+            or item.get("Lieferant_Typ")
+            or item.get("kategorie")
+            or item.get("Kategorie")
+            or ""
+        ).strip()
 
-    clu_has_k = bool(cluster["kostenstelle_norm"])
-    clu_has_c = bool(cluster["kommission_norm"])
-    clu_has_b = bool(cluster["baustelle_norm"])
-
-    # ---------------------------------
-    # 1) KOSTENSTELLE
-    # ---------------------------------
-    if feat_has_k and clu_has_k:
-        if feat["kostenstelle_norm"] == cluster["kostenstelle_norm"]:
-            if feat["kostenstelle_generisch"] or cluster.get("kostenstelle_generisch", False):
-                score += 0.8
-                reasons.append("KOSTENSTELLE_GENERISCH_GLEICH")
-            else:
-                score += 3.2
-                reasons.append("KOSTENSTELLE_GLEICH")
-        else:
-            if not feat["kostenstelle_generisch"] and not cluster.get("kostenstelle_generisch", False):
-                return 0.0, ["KOSTENSTELLE_KONFLIKT"]
-
-    # ---------------------------------
-    # 2) BAUSTELLE
-    # ---------------------------------
-    if feat_has_b and clu_has_b:
-        if feat["baustelle_norm"] == cluster["baustelle_norm"]:
-            score += 2.8
-            reasons.append("BAUSTELLE_GLEICH")
-        else:
-            sim = text_similarity(feat["baustelle_norm"], cluster["baustelle_norm"])
-            if sim >= 0.93:
-                score += 2.0
-                reasons.append("BAUSTELLE_SEHR_AEHNLICH")
-            elif sim >= 0.86:
-                score += 1.2
-                reasons.append("BAUSTELLE_AEHNLICH")
-            elif (
-                feat_has_k and clu_has_k
-                and feat["kostenstelle_norm"] == cluster["kostenstelle_norm"]
-                and not feat["kostenstelle_generisch"]
-                and not cluster.get("kostenstelle_generisch", False)
-            ):
-                score += 0.25
-                reasons.append("BAUSTELLE_ABWEICHEND_ABER_KOSTENSTELLE_STARK")
-            else:
-                return 0.0, ["BAUSTELLE_KONFLIKT"]
-
-    # ---------------------------------
-    # 3) KOMMISSION
-    # ---------------------------------
-    if feat_has_c and clu_has_c:
-        if feat["kommission_norm"] == cluster["kommission_norm"]:
-            score += 2.2
-            reasons.append("KOMMISSION_GLEICH")
-        else:
-            sim = text_similarity(feat["kommission_norm"], cluster["kommission_norm"])
-            if sim >= 0.93:
-                score += 1.6
-                reasons.append("KOMMISSION_SEHR_AEHNLICH")
-            elif sim >= 0.86:
-                score += 0.9
-                reasons.append("KOMMISSION_AEHNLICH")
-            elif (
-                feat_has_k and clu_has_k
-                and feat["kostenstelle_norm"] == cluster["kostenstelle_norm"]
-                and not feat["kostenstelle_generisch"]
-                and not cluster.get("kostenstelle_generisch", False)
-            ):
-                score += 0.15
-                reasons.append("KOMMISSION_ABWEICHEND_ABER_KOSTENSTELLE_STARK")
-
-    # ---------------------------------
-    # 4) PROJEKTTEXT / CROSS MATCH
-    # ---------------------------------
-    if feat_has_t:
-        if clu_has_k and _contains_token(feat["projekt_text_norm"], cluster["kostenstelle_norm"]):
-            score += 0.7
-            reasons.append("TEXT_ENTHAELT_KOSTENSTELLE")
-        if clu_has_c and _contains_token(feat["projekt_text_norm"], cluster["kommission_norm"]):
-            score += 0.6
-            reasons.append("TEXT_ENTHAELT_KOMMISSION")
-        if clu_has_b and _contains_token(feat["projekt_text_norm"], cluster["baustelle_norm"]):
-            score += 0.6
-            reasons.append("TEXT_ENTHAELT_BAUSTELLE")
-
-    if cluster.get("projekt_text_norm"):
-        cluster_text = cluster["projekt_text_norm"]
-        if feat_has_k and _contains_token(cluster_text, feat["kostenstelle_norm"]):
-            score += 0.5
-            reasons.append("CLUSTER_TEXT_ENTHAELT_KOSTENSTELLE")
-        if feat_has_c and _contains_token(cluster_text, feat["kommission_norm"]):
-            score += 0.45
-            reasons.append("CLUSTER_TEXT_ENTHAELT_KOMMISSION")
-        if feat_has_b and _contains_token(cluster_text, feat["baustelle_norm"]):
-            score += 0.45
-            reasons.append("CLUSTER_TEXT_ENTHAELT_BAUSTELLE")
-
-    # ---------------------------------
-    # 5) MINDESTLOGIK
-    # ---------------------------------
-    harte_treffer = 0
-    if "KOSTENSTELLE_GLEICH" in reasons:
-        harte_treffer += 1
-    if "BAUSTELLE_GLEICH" in reasons or "BAUSTELLE_SEHR_AEHNLICH" in reasons:
-        harte_treffer += 1
-    if "KOMMISSION_GLEICH" in reasons or "KOMMISSION_SEHR_AEHNLICH" in reasons:
-        harte_treffer += 1
-
-    # Wenn nur generische Kostenstelle ohne weitere Signale -> nicht matchen
-    if score < 1.2:
-        return 0.0, reasons
-
-    if (
-        feat_has_k and clu_has_k
-        and feat["kostenstelle_norm"] == cluster["kostenstelle_norm"]
-        and (feat["kostenstelle_generisch"] or cluster.get("kostenstelle_generisch", False))
-        and harte_treffer == 0
-        and "TEXT_ENTHAELT_KOMMISSION" not in reasons
-        and "TEXT_ENTHAELT_BAUSTELLE" not in reasons
-        and "CLUSTER_TEXT_ENTHAELT_KOMMISSION" not in reasons
-        and "CLUSTER_TEXT_ENTHAELT_BAUSTELLE" not in reasons
-    ):
-        return 0.0, ["NUR_GENERISCHE_KOSTENSTELLE"]
-
-    return score, reasons
-
-def build_project_clusters(rechnungen):
-    prepared = []
-
-    def clean_text(value):
-        s = normalize_text_basic(value)
-        s = s.replace("straße", "str")
-        s = s.replace("strasse", "str")
-        s = s.replace("str.", "str")
-        s = s.replace("corn.", "cornelius")
-        s = s.replace("corn-", "cornelius-")
-        s = s.replace("corn ", "cornelius ")
-        s = s.replace("deutschland", " ")
-        s = s.replace("platzhalter", " ")
-        s = s.replace("abholung", " ")
-        s = s.replace("lieferung", " ")
-        s = s.replace("innend", " ")
-        s = s.replace("aussend", " ")
-        s = s.replace("außend", " ")
-        s = s.replace("webshop", " ")
-        s = s.replace("gmbh", " ")
-        s = s.replace("gebaeudetechnik", " ")
-        s = re.sub(r"\bvom\s+\d{2}\.\d{2}\.\d{4}\b", " ", s)
-        s = re.sub(r"\b\d{6,}[-/][0-9a-z-]+\b", " ", s)
-        s = re.sub(r"[^a-z0-9 ]", " ", s)
-        s = re.sub(r"\s+", " ", s).strip()
-        return s
-
-    def build_address_cluster_key(value):
-        raw = str(value or "").strip()
-        if not raw:
-            return ""
-
-        s = clean_text(raw)
-        if not s:
-            return ""
-
-        street_patterns = [
-            r"([a-z0-9 ]+?\bstr\b\s+\d+[a-z]?)",
-            r"([a-z0-9 ]+?\bweg\b\s+\d+[a-z]?)",
-            r"([a-z0-9 ]+?\bgasse\b\s+\d+[a-z]?)",
-            r"([a-z0-9 ]+?\ballee\b\s+\d+[a-z]?)",
-            r"([a-z0-9 ]+?\bplatz\b\s+\d+[a-z]?)",
-            r"([a-z0-9 ]+?\blehnhof\b\s+\d+[a-z]?)",
-            r"([a-z0-9 ]+?\bweiden\b\s+\d+[a-z]?)",
-            r"([a-z0-9 ]+?\brepsch\b\s+\d+[a-z]?)",
-            r"([a-z0-9 ]+?\btrift\b\s+\d+[a-z]?)",
-        ]
-
-        street = ""
-        for pattern in street_patterns:
-            m = re.search(pattern, s)
-            if m:
-                street = m.group(1).strip()
-                break
-
-        if not street:
-            tokens = s.split()
-            haus_idx = None
-            for i, t in enumerate(tokens):
-                if re.fullmatch(r"\d+[a-z]?", t):
-                    haus_idx = i
-                    break
-
-            if haus_idx is not None:
-                start = max(0, haus_idx - 4)
-                end = min(len(tokens), haus_idx + 1)
-                street = " ".join(tokens[start:end]).strip()
-
-        if not street:
-            return ""
-
-        plz_match = re.search(r"\b(\d{5})\b", normalize_text_basic(raw))
-        plz = plz_match.group(1) if plz_match else ""
-
-        street = re.sub(r"\s+", " ", street).strip()
-
-        return f"{street}|{plz}" if plz else street
-
-    def is_lager_item(kostenstelle_raw, kommission_raw, baustelle_raw, projekt_text_raw):
-        joined = " ".join([
-            normalize_text_basic(kostenstelle_raw),
-            normalize_text_basic(kommission_raw),
-            normalize_text_basic(baustelle_raw),
-            normalize_text_basic(projekt_text_raw),
-        ])
-        return ("p1" in joined) or ("lager" in joined) or ("lagerbestand" in joined)
-
-    def best_nonempty(values):
-        vals = [str(v).strip() for v in values if str(v or "").strip()]
-        if not vals:
-            return ""
-        return Counter(vals).most_common(1)[0][0]
-
-    def choose_best_address(values):
-        vals = [str(v).strip() for v in values if str(v or "").strip()]
-        if not vals:
-            return ""
-        vals_sorted = sorted(vals, key=lambda x: len(x), reverse=True)
-        return vals_sorted[0]
-
-    def make_display_name(cluster):
-        baustelle = choose_best_address(cluster["baustelle_values"])
-        kostenstelle = best_nonempty(cluster["kostenstelle_values"])
-        kommission = best_nonempty(cluster["kommission_values"])
-
-        if cluster["is_lager"]:
-            return "Lager / P1"
-
-        if baustelle and kostenstelle and not is_generic_kostenstelle(kostenstelle):
-            return f"{baustelle} / {kostenstelle}"
-
-        if baustelle:
-            return baustelle
-
-        if kostenstelle and not is_generic_kostenstelle(kostenstelle):
-            return kostenstelle
-
-        if kommission:
-            return kommission
-
-        return "Unbekanntes Projekt"
-
-    def make_cluster_signature(cluster):
-        return {
-            "address_keys": set(cluster["address_keys"]),
-            "kostenstelle_norms": set(cluster["kostenstelle_norms"]),
-            "kommission_norms": set(cluster["kommission_norms"]),
-            "is_lager": cluster["is_lager"],
+        entry = {
+            "lieferant_id": lieferant_id,
+            "lieferant_name": lieferant_name,
+            "lieferant_typ": lieferant_typ,
         }
 
-    def clusters_should_merge(a, b):
-        if a["is_lager"] and b["is_lager"]:
-            return True
+        if lieferant_id:
+            result[lieferant_id] = entry
+        elif lieferant_name:
+            result[f"NAME::{normalize_name(lieferant_name)}"] = entry
 
-        if a["is_lager"] != b["is_lager"]:
-            return False
+    return result
 
-        a_addr = set(a["address_keys"])
-        b_addr = set(b["address_keys"])
-        a_kst = set(a["kostenstelle_norms"])
-        b_kst = set(b["kostenstelle_norms"])
-        a_kom = set(a["kommission_norms"])
-        b_kom = set(b["kommission_norms"])
+def build_lieferanten_kontext_output(lieferanten_kontext):
+    out = []
 
-        if a_addr and b_addr:
-            if a_addr.intersection(b_addr):
-                return True
+    for item in (lieferanten_kontext or []):
+        lieferant_id = str(
+            item.get("lieferant_id")
+            or item.get("Lieferant_ID")
+            or ""
+        ).strip()
 
-            for x in a_addr:
-                for y in b_addr:
-                    if text_similarity(x, y) >= 0.93:
-                        return True
+        lieferant_name = str(
+            item.get("lieferant_name")
+            or item.get("Lieferant_Name")
+            or ""
+        ).strip()
 
-        strong_kst = [x for x in a_kst.intersection(b_kst) if x]
-        if strong_kst:
-            for x in strong_kst:
-                if not is_generic_kostenstelle(x):
-                    return True
+        lieferant_typ = str(
+            item.get("lieferant_typ")
+            or item.get("Lieferant_Typ")
+            or item.get("kategorie")
+            or item.get("Kategorie")
+            or ""
+        ).strip()
 
-        strong_kom = a_kom.intersection(b_kom)
-        if strong_kom and (a_addr or b_addr):
-            return True
-
-        if a_addr and b_kst:
-            for x in b_kst:
-                if x and not is_generic_kostenstelle(x):
-                    joined = " ".join(list(a_addr))
-                    if x in joined:
-                        return True
-
-        if b_addr and a_kst:
-            for x in a_kst:
-                if x and not is_generic_kostenstelle(x):
-                    joined = " ".join(list(b_addr))
-                    if x in joined:
-                        return True
-
-        return False
-
-    def merge_cluster_into(target, source, reason):
-        for rid in source["rechnung_ids"]:
-            if rid not in target["rechnung_ids"]:
-                target["rechnung_ids"].append(rid)
-
-        target["rechnungen"].extend(source["rechnungen"])
-        target["summe_brutto"] += source["summe_brutto"]
-
-        target["kostenstelle_values"].extend(source["kostenstelle_values"])
-        target["kommission_values"].extend(source["kommission_values"])
-        target["baustelle_values"].extend(source["baustelle_values"])
-
-        target["address_keys"].update(source["address_keys"])
-        target["kostenstelle_norms"].update(source["kostenstelle_norms"])
-        target["kommission_norms"].update(source["kommission_norms"])
-
-        target["match_hinweise"].append(reason)
-        target["match_hinweise"].extend(source["match_hinweise"])
-
-    for r in rechnungen:
-        feat = extract_project_features(r)
-
-        kostenstelle_raw = str(feat.get("kostenstelle_raw") or "").strip()
-        kommission_raw = str(feat.get("kommission_raw") or "").strip()
-        baustelle_raw = str(feat.get("baustelle_raw") or "").strip()
-        projekt_text_raw = str(feat.get("projekt_text_raw") or "").strip()
-
-        prepared.append({
-            "rechnung": r,
-            "rechnung_id": get_rechnung_id(r),
-            "brutto": get_brutto_summe(r),
-            "kostenstelle_raw": kostenstelle_raw,
-            "kostenstelle_norm": normalize_code(kostenstelle_raw),
-            "kommission_raw": kommission_raw,
-            "kommission_norm": normalize_name(kommission_raw),
-            "baustelle_raw": baustelle_raw,
-            "address_key": build_address_cluster_key(baustelle_raw),
-            "projekt_text_raw": projekt_text_raw,
-            "is_lager": is_lager_item(kostenstelle_raw, kommission_raw, baustelle_raw, projekt_text_raw),
+        out.append({
+            "lieferant_id": lieferant_id,
+            "lieferant_name": lieferant_name,
+            "lieferant_typ": lieferant_typ,
+            "kosten_kategorie": map_lieferant_typ_to_kategorie(lieferant_typ),
         })
 
-    def new_cluster(item, reason):
-        dokumenttyp = get_dokumenttyp(item["rechnung"])
-        brutto = item["brutto"]
+    out.sort(key=lambda x: (x["lieferant_name"], x["lieferant_id"]))
+    return out
 
-        rechnung_summe_brutto = brutto if dokumenttyp == "RECHNUNG" else 0.0
-        gutschrift_summe_brutto = brutto if dokumenttyp == "GUTSCHRIFT" else 0.0
+def build_project_clusters(rechnungen, lieferanten_kontext_map=None):
+    lieferanten_kontext_map = lieferanten_kontext_map or {}
+
+    prepared = []
+
+    def is_lager_item(feat):
+        values = [
+            str(feat.get("kostenstelle_raw") or "").strip().lower(),
+            str(feat.get("kommission_raw") or "").strip().lower(),
+            str(feat.get("baustelle_raw") or "").strip().lower(),
+            str(feat.get("projekt_text_raw") or "").strip().lower(),
+        ]
+        joined = " ".join(values)
+        return ("p1" in joined) or ("lager" in joined) or ("lagerbestand" in joined)
+
+    def make_cluster_from_item(item, reason):
+        feat = item["feat"]
+        rechnung = item["rechnung"]
+        brutto = get_brutto_summe(rechnung)
+
+        kategorie = get_lieferant_kategorie(rechnung, lieferanten_kontext_map)
+
+        material = brutto if (is_rechnung(rechnung) and kategorie == "material") else 0.0
+        subunternehmer = brutto if (is_rechnung(rechnung) and kategorie == "subunternehmer") else 0.0
+        sonstiges = brutto if (is_rechnung(rechnung) and kategorie == "sonstiges") else 0.0
 
         return {
-            "rechnung_ids": [item["rechnung_id"]],
-            "rechnungen": [item["rechnung"]],
-            "summe_brutto": brutto,
-            "rechnung_summe_brutto": rechnung_summe_brutto,
-            "gutschrift_summe_brutto": gutschrift_summe_brutto,
-            "anzahl_rechnungen": 1 if dokumenttyp == "RECHNUNG" else 0,
-            "anzahl_gutschriften": 1 if dokumenttyp == "GUTSCHRIFT" else 0,
-            "kostenstelle_values": [item["kostenstelle_raw"]] if item["kostenstelle_raw"] else [],
-            "kommission_values": [item["kommission_raw"]] if item["kommission_raw"] else [],
-            "baustelle_values": [item["baustelle_raw"]] if item["baustelle_raw"] else [],
-            "address_keys": set([item["address_key"]]) if item["address_key"] else set(),
-            "kostenstelle_norms": set([item["kostenstelle_norm"]]) if item["kostenstelle_norm"] else set(),
-            "kommission_norms": set([item["kommission_norm"]]) if item["kommission_norm"] else set(),
+            "rechnungen": [rechnung],
+            "rechnung_ids": [get_rechnung_id(rechnung)],
+            "rechnungsnummern": [get_rechnungsnummer(rechnung)] if get_rechnungsnummer(rechnung) else [],
+            "kostenstelle_values": [feat["kostenstelle_raw"]] if feat["kostenstelle_raw"] else [],
+            "kommission_values": [feat["kommission_raw"]] if feat["kommission_raw"] else [],
+            "baustelle_values": [feat["baustelle_raw"]] if feat["baustelle_raw"] else [],
+            "projekt_text_values": [feat["projekt_text_raw"]] if feat["projekt_text_raw"] else [],
+            "address_keys": {feat["address_key"]} if feat["address_key"] else set(),
+            "kostenstelle_norms": {feat["kostenstelle_norm"]} if feat["kostenstelle_norm"] else set(),
+            "kommission_norms": {feat["kommission_norm"]} if feat["kommission_norm"] else set(),
             "match_hinweise": [reason],
-            "is_lager": item["is_lager"],
+            "is_lager": is_lager_item(feat),
+            "rechnung_summe_brutto": round(brutto if is_rechnung(rechnung) else 0.0, 2),
+            "gutschrift_summe_brutto": round(brutto if is_gutschrift(rechnung) else 0.0, 2),
+            "nettoeffekt_brutto": round(brutto, 2),
+            "kostenstruktur_material_brutto": round(material, 2),
+            "kostenstruktur_subunternehmer_brutto": round(subunternehmer, 2),
+            "kostenstruktur_sonstiges_brutto": round(sonstiges, 2),
+            "anzahl_rechnungen": 1 if is_rechnung(rechnung) else 0,
+            "anzahl_gutschriften": 1 if is_gutschrift(rechnung) else 0,
+            "anzahl_dokumente": 1,
         }
 
+    def add_item_to_cluster(cluster, item, reason):
+        feat = item["feat"]
+        rechnung = item["rechnung"]
+        brutto = get_brutto_summe(rechnung)
 
-    def add_to_cluster(cluster, item, reason):
-        dokumenttyp = get_dokumenttyp(item["rechnung"])
-        brutto = item["brutto"]
+        kategorie = get_lieferant_kategorie(rechnung, lieferanten_kontext_map)
 
-        cluster["rechnung_ids"].append(item["rechnung_id"])
-        cluster["rechnungen"].append(item["rechnung"])
-        cluster["summe_brutto"] += brutto
+        if get_rechnung_id(rechnung):
+            cluster["rechnung_ids"].append(get_rechnung_id(rechnung))
+        if get_rechnungsnummer(rechnung):
+            cluster["rechnungsnummern"].append(get_rechnungsnummer(rechnung))
 
-        if dokumenttyp == "RECHNUNG":
-            cluster["rechnung_summe_brutto"] += brutto
-            cluster["anzahl_rechnungen"] += 1
-        elif dokumenttyp == "GUTSCHRIFT":
-            cluster["gutschrift_summe_brutto"] += brutto
-            cluster["anzahl_gutschriften"] += 1
+        cluster["rechnungen"].append(rechnung)
 
-        if item["kostenstelle_raw"]:
-            cluster["kostenstelle_values"].append(item["kostenstelle_raw"])
-        if item["kommission_raw"]:
-            cluster["kommission_values"].append(item["kommission_raw"])
-        if item["baustelle_raw"]:
-            cluster["baustelle_values"].append(item["baustelle_raw"])
+        if feat["kostenstelle_raw"]:
+            cluster["kostenstelle_values"].append(feat["kostenstelle_raw"])
+        if feat["kommission_raw"]:
+            cluster["kommission_values"].append(feat["kommission_raw"])
+        if feat["baustelle_raw"]:
+            cluster["baustelle_values"].append(feat["baustelle_raw"])
+        if feat["projekt_text_raw"]:
+            cluster["projekt_text_values"].append(feat["projekt_text_raw"])
 
-        if item["address_key"]:
-            cluster["address_keys"].add(item["address_key"])
-        if item["kostenstelle_norm"]:
-            cluster["kostenstelle_norms"].add(item["kostenstelle_norm"])
-        if item["kommission_norm"]:
-            cluster["kommission_norms"].add(item["kommission_norm"])
+        if feat["address_key"]:
+            cluster["address_keys"].add(feat["address_key"])
+        if feat["kostenstelle_norm"]:
+            cluster["kostenstelle_norms"].add(feat["kostenstelle_norm"])
+        if feat["kommission_norm"]:
+            cluster["kommission_norms"].add(feat["kommission_norm"])
 
         cluster["match_hinweise"].append(reason)
 
-    clusters = []
+        if is_rechnung(rechnung):
+            cluster["rechnung_summe_brutto"] = round(cluster["rechnung_summe_brutto"] + brutto, 2)
+            cluster["anzahl_rechnungen"] += 1
 
-    for item in prepared:
-        matched_idx = None
-        matched_reason = ""
-
-        for idx, cluster in enumerate(clusters):
-            temp_cluster = {
-                "address_keys": cluster["address_keys"],
-                "kostenstelle_norms": cluster["kostenstelle_norms"],
-                "kommission_norms": cluster["kommission_norms"],
-                "is_lager": cluster["is_lager"],
-            }
-
-            item_as_cluster = {
-                "address_keys": set([item["address_key"]]) if item["address_key"] else set(),
-                "kostenstelle_norms": set([item["kostenstelle_norm"]]) if item["kostenstelle_norm"] else set(),
-                "kommission_norms": set([item["kommission_norm"]]) if item["kommission_norm"] else set(),
-                "is_lager": item["is_lager"],
-            }
-
-            if clusters_should_merge(temp_cluster, item_as_cluster):
-                matched_idx = idx
-                if item["is_lager"]:
-                    matched_reason = "LAGER_DIREKT"
-                elif item["address_key"]:
-                    matched_reason = "ADRESSE_GLEICH"
-                elif item["kostenstelle_norm"]:
-                    matched_reason = "KOSTENSTELLE_NACHGEZOGEN"
-                elif item["kommission_norm"]:
-                    matched_reason = "KOMMISSION_NACHGEZOGEN"
-                else:
-                    matched_reason = "ZUSAMMENGEFUEHRT"
-                break
-
-        if matched_idx is None:
-            if item["is_lager"]:
-                reason = "LAGER_DIREKT"
-            elif item["address_key"]:
-                reason = "ADRESSE_GLEICH"
+            if kategorie == "material":
+                cluster["kostenstruktur_material_brutto"] = round(cluster["kostenstruktur_material_brutto"] + brutto, 2)
+            elif kategorie == "subunternehmer":
+                cluster["kostenstruktur_subunternehmer_brutto"] = round(cluster["kostenstruktur_subunternehmer_brutto"] + brutto, 2)
             else:
-                reason = "EINZELFALL"
-            clusters.append(new_cluster(item, reason))
-        else:
-            add_to_cluster(clusters[matched_idx], item, matched_reason)
+                cluster["kostenstruktur_sonstiges_brutto"] = round(cluster["kostenstruktur_sonstiges_brutto"] + brutto, 2)
 
-    # zweite Merge-Runde für bereits gebildete Cluster
-    changed = True
-    while changed:
-        changed = False
-        merged = []
-        used = set()
+        if is_gutschrift(rechnung):
+            cluster["gutschrift_summe_brutto"] = round(cluster["gutschrift_summe_brutto"] + brutto, 2)
+            cluster["anzahl_gutschriften"] += 1
 
-        for i in range(len(clusters)):
-            if i in used:
-                continue
+        cluster["nettoeffekt_brutto"] = round(cluster["nettoeffekt_brutto"] + brutto, 2)
+        cluster["anzahl_dokumente"] += 1
 
-            base = clusters[i]
+    def strong_address_match(feat, cluster):
+        if not feat["address_key"] or not cluster["address_keys"]:
+            return False
+        if feat["address_key"] in cluster["address_keys"]:
+            return True
 
-            for j in range(i + 1, len(clusters)):
-                if j in used:
-                    continue
+        for existing_key in cluster["address_keys"]:
+            sim = text_similarity(feat["address_key"], existing_key)
+            if sim >= 0.93:
+                return True
+        return False
 
-                other = clusters[j]
+    def strict_person_match(a, b):
+        if not a or not b:
+            return False
+        if a == b:
+            return True
+        sim = text_similarity(a, b)
+        return sim >= 0.93
 
-                if clusters_should_merge(base, other):
-                    merge_cluster_into(base, other, "CLUSTER_ZUSAMMENGEFUEHRT")
-                    used.add(j)
-                    changed = True
+    def can_attach_orphan_to_cluster(item, cluster):
+        feat = item["feat"]
 
-            merged.append(base)
+        # 1) harte Kostenstelle
+        if (
+            feat["kostenstelle_norm"]
+            and not feat["kostenstelle_generisch"]
+            and feat["kostenstelle_norm"] in cluster["kostenstelle_norms"]
+        ):
+            return "KOSTENSTELLE_NACHGEZOGEN"
 
-        clusters = merged
+        # 2) eindeutige Personen-Kommission
+        if feat["kommission_norm"] and is_full_person_name(feat["kommission_raw"]):
+            for existing_norm in cluster["kommission_norms"]:
+                if strict_person_match(feat["kommission_norm"], existing_norm):
+                    return "KOMMISSION_NACHGEZOGEN"
 
-    result = []
+        return ""
 
-    for idx, cluster in enumerate(clusters, start=1):
-        kostenstelle = best_nonempty(cluster["kostenstelle_values"])
-        kommission = best_nonempty(cluster["kommission_values"])
-        baustelle = choose_best_address(cluster["baustelle_values"])
+    def merge_two_clusters(a, b):
+        merged = {
+            "rechnungen": list(a["rechnungen"]) + list(b["rechnungen"]),
+            "rechnung_ids": list(a["rechnung_ids"]) + list(b["rechnung_ids"]),
+            "rechnungsnummern": list(a["rechnungsnummern"]) + list(b["rechnungsnummern"]),
+            "kostenstelle_values": list(a["kostenstelle_values"]) + list(b["kostenstelle_values"]),
+            "kommission_values": list(a["kommission_values"]) + list(b["kommission_values"]),
+            "baustelle_values": list(a["baustelle_values"]) + list(b["baustelle_values"]),
+            "projekt_text_values": list(a["projekt_text_values"]) + list(b["projekt_text_values"]),
+            "address_keys": set(a["address_keys"]) | set(b["address_keys"]),
+            "kostenstelle_norms": set(a["kostenstelle_norms"]) | set(b["kostenstelle_norms"]),
+            "kommission_norms": set(a["kommission_norms"]) | set(b["kommission_norms"]),
+            "match_hinweise": list(a["match_hinweise"]) + list(b["match_hinweise"]) + ["CLUSTER_ZUSAMMENGEFUEHRT"],
+            "is_lager": a["is_lager"] or b["is_lager"],
+            "rechnung_summe_brutto": round(a["rechnung_summe_brutto"] + b["rechnung_summe_brutto"], 2),
+            "gutschrift_summe_brutto": round(a["gutschrift_summe_brutto"] + b["gutschrift_summe_brutto"], 2),
+            "nettoeffekt_brutto": round(a["nettoeffekt_brutto"] + b["nettoeffekt_brutto"], 2),
+            "kostenstruktur_material_brutto": round(a["kostenstruktur_material_brutto"] + b["kostenstruktur_material_brutto"], 2),
+            "kostenstruktur_subunternehmer_brutto": round(a["kostenstruktur_subunternehmer_brutto"] + b["kostenstruktur_subunternehmer_brutto"], 2),
+            "kostenstruktur_sonstiges_brutto": round(a["kostenstruktur_sonstiges_brutto"] + b["kostenstruktur_sonstiges_brutto"], 2),
+            "anzahl_rechnungen": a["anzahl_rechnungen"] + b["anzahl_rechnungen"],
+            "anzahl_gutschriften": a["anzahl_gutschriften"] + b["anzahl_gutschriften"],
+            "anzahl_dokumente": a["anzahl_dokumente"] + b["anzahl_dokumente"],
+        }
+        return merged
+
+    def should_merge_clusters(a, b):
+        if a["is_lager"] != b["is_lager"]:
+            return False
+
+        if a["is_lager"] and b["is_lager"]:
+            return True
+
+        a_address = choose_best_value(a["baustelle_values"])
+        b_address = choose_best_value(b["baustelle_values"])
+        a_kommission = normalize_person_name_for_match(choose_best_value(a["kommission_values"]))
+        b_kommission = normalize_person_name_for_match(choose_best_value(b["kommission_values"]))
+        a_kostenstelle = choose_best_value(a["kostenstelle_values"])
+        b_kostenstelle = choose_best_value(b["kostenstelle_values"])
+
+        # gleiche/nahe Adresse
+        address_match = False
+        if a["address_keys"] and b["address_keys"]:
+            for ka in a["address_keys"]:
+                for kb in b["address_keys"]:
+                    if ka == kb or text_similarity(ka, kb) >= 0.93:
+                        address_match = True
+                        break
+                if address_match:
+                    break
+
+        # gleiche starke Kostenstelle
+        strong_kostenstelle_match = False
+        if a_kostenstelle and b_kostenstelle:
+            if (not is_generic_kostenstelle(a_kostenstelle)) and (not is_generic_kostenstelle(b_kostenstelle)):
+                if normalize_code(a_kostenstelle) == normalize_code(b_kostenstelle):
+                    strong_kostenstelle_match = True
+
+        # gleiche Personen-Kommission
+        person_match = False
+        if a_kommission and b_kommission:
+            if is_full_person_name(a_kommission) and is_full_person_name(b_kommission):
+                if strict_person_match(a_kommission, b_kommission):
+                    person_match = True
+
+        if address_match and (strong_kostenstelle_match or person_match):
+            return True
+
+        # Spezialfall: gleiche echte Adresse, eine Seite mit Kostenstelle, andere ohne
+        if address_match and (a_address or b_address):
+            return True
+
+        return False
+
+    def build_cluster_result(cluster, idx):
+        kostenstelle = choose_best_value(cluster["kostenstelle_values"])
+        kommission = choose_best_value(cluster["kommission_values"])
+        baustelle = choose_best_value(cluster["baustelle_values"])
 
         confidence = 0.55
 
@@ -2819,15 +2411,15 @@ def build_project_clusters(rechnungen):
             confidence = 0.80
         else:
             if cluster["address_keys"]:
-                confidence += 0.18
+                confidence += 0.20
             if kostenstelle and not is_generic_kostenstelle(kostenstelle):
                 confidence += 0.10
             if kommission and is_full_person_name(kommission):
-                confidence += 0.07
-            if len(cluster["rechnung_ids"]) >= 2:
                 confidence += 0.08
-            if len(cluster["rechnung_ids"]) >= 4:
-                confidence += 0.05
+            if cluster["anzahl_dokumente"] >= 2:
+                confidence += 0.07
+            if "CLUSTER_ZUSAMMENGEFUEHRT" in cluster["match_hinweise"]:
+                confidence += 0.03
 
         confidence = min(round(confidence, 2), 0.98)
 
@@ -2838,28 +2430,173 @@ def build_project_clusters(rechnungen):
         else:
             status = "unsicher"
 
-        result.append({
+        projekt_name_report = ""
+        if cluster["is_lager"]:
+            projekt_name_report = "Lager / P1"
+        elif baustelle and kostenstelle and not is_generic_kostenstelle(kostenstelle):
+            projekt_name_report = f"{baustelle} / {kostenstelle}"
+        elif baustelle:
+            projekt_name_report = baustelle
+        elif kostenstelle and not is_generic_kostenstelle(kostenstelle):
+            projekt_name_report = kostenstelle
+        elif kommission:
+            projekt_name_report = kommission
+        else:
+            projekt_name_report = ""
+
+        return {
             "projekt_cluster_id": f"PC_{idx:04d}",
-            "projekt_name_report": make_display_name(cluster),
+            "projekt_name_report": projekt_name_report,
             "erkannte_baustelle": baustelle,
             "erkannte_kostenstelle": kostenstelle,
             "erkannte_kommission": kommission,
-            "projekt_summe_brutto": round(cluster["summe_brutto"], 2),
+            "projekt_summe_brutto": round(cluster["nettoeffekt_brutto"], 2),
             "rechnung_summe_brutto": round(cluster["rechnung_summe_brutto"], 2),
             "gutschrift_summe_brutto": round(cluster["gutschrift_summe_brutto"], 2),
-            "nettoeffekt_brutto": round(cluster["summe_brutto"], 2),
+            "nettoeffekt_brutto": round(cluster["nettoeffekt_brutto"], 2),
             "anzahl_rechnungen": cluster["anzahl_rechnungen"],
             "anzahl_gutschriften": cluster["anzahl_gutschriften"],
-            "anzahl_dokumente": len(cluster["rechnung_ids"]),
+            "anzahl_dokumente": cluster["anzahl_dokumente"],
             "confidence": confidence,
             "status": status,
-            "zugeordnete_rechnung_ids": cluster["rechnung_ids"],
+            "zugeordnete_rechnung_ids": unique_nonempty(cluster["rechnung_ids"]),
+            "zugeordnete_rechnungsnummern": unique_nonempty(cluster["rechnungsnummern"]),
             "match_hinweise": sorted(list(set(cluster["match_hinweise"]))),
             "offen_unterbestimmt": False,
+        }
+
+    # vorbereiten
+    for r in rechnungen:
+        feat = extract_project_features(r)
+        prepared.append({
+            "rechnung": r,
+            "feat": feat,
         })
 
-    result.sort(key=lambda x: x.get("projekt_summe_brutto", 0), reverse=True)
+    address_clusters = []
+    orphan_items = []
+    lager_cluster = None
+
+    # Phase 1: adressbasierte Cluster
+    for item in prepared:
+        feat = item["feat"]
+
+        if is_lager_item(feat):
+            if lager_cluster is None:
+                lager_cluster = make_cluster_from_item(item, "LAGER_DIREKT")
+            else:
+                add_item_to_cluster(lager_cluster, item, "LAGER_DIREKT")
+            continue
+
+        if feat["address_key"]:
+            matched = False
+            for cluster in address_clusters:
+                if strong_address_match(feat, cluster):
+                    add_item_to_cluster(cluster, item, "ADRESSE_GLEICH")
+                    matched = True
+                    break
+
+            if not matched:
+                address_clusters.append(make_cluster_from_item(item, "ADRESSE_GLEICH"))
+        else:
+            orphan_items.append(item)
+
+    # Phase 2: adresslose Fälle nur vorsichtig nachziehen
+    standalone_clusters = []
+
+    for item in orphan_items:
+        candidates = []
+
+        for cluster in address_clusters:
+            reason = can_attach_orphan_to_cluster(item, cluster)
+            if reason:
+                candidates.append((cluster, reason))
+
+        if len(candidates) == 1:
+            cluster, reason = candidates[0]
+            add_item_to_cluster(cluster, item, reason)
+        else:
+            standalone_clusters.append(make_cluster_from_item(item, "EINZELFALL"))
+
+    all_clusters = list(address_clusters)
+    if lager_cluster is not None:
+        all_clusters.append(lager_cluster)
+    all_clusters.extend(standalone_clusters)
+
+    # Phase 3: Cluster zusammenführen
+    changed = True
+    while changed:
+        changed = False
+        merged_clusters = []
+        used = set()
+
+        for i in range(len(all_clusters)):
+            if i in used:
+                continue
+
+            current = all_clusters[i]
+
+            for j in range(i + 1, len(all_clusters)):
+                if j in used:
+                    continue
+
+                other = all_clusters[j]
+                if should_merge_clusters(current, other):
+                    current = merge_two_clusters(current, other)
+                    used.add(j)
+                    changed = True
+
+            merged_clusters.append(current)
+
+        all_clusters = merged_clusters
+
+    result = []
+    for idx, cluster in enumerate(all_clusters, start=1):
+        result.append(build_cluster_result(cluster, idx))
+
+    result.sort(key=lambda x: x.get("nettoeffekt_brutto", 0), reverse=True)
     return result
+
+def build_project_report_list(projekt_cluster, lieferanten_kontext_map=None):
+    lieferanten_kontext_map = lieferanten_kontext_map or {}
+    out = []
+
+    for cluster in projekt_cluster:
+        material = round(to_float_safe(cluster.get("kostenstruktur_material_brutto")), 2)
+        subunternehmer = round(to_float_safe(cluster.get("kostenstruktur_subunternehmer_brutto")), 2)
+        sonstiges = round(to_float_safe(cluster.get("kostenstruktur_sonstiges_brutto")), 2)
+
+        projekt_name = str(cluster.get("projekt_name_report") or "").strip()
+        if not projekt_name:
+            projekt_name = str(cluster.get("erkannte_baustelle") or "").strip()
+        if not projekt_name:
+            projekt_name = str(cluster.get("erkannte_kostenstelle") or "").strip()
+        if not projekt_name:
+            projekt_name = str(cluster.get("erkannte_kommission") or "").strip()
+
+        out.append({
+            "projekt_name": projekt_name,
+            "erkannte_baustelle": str(cluster.get("erkannte_baustelle") or "").strip(),
+            "erkannte_kostenstelle": str(cluster.get("erkannte_kostenstelle") or "").strip(),
+            "erkannte_kommission": str(cluster.get("erkannte_kommission") or "").strip(),
+            "status": str(cluster.get("status") or "").strip(),
+            "confidence": to_float_safe(cluster.get("confidence")),
+            "anzahl_rechnungen": int(cluster.get("anzahl_rechnungen") or 0),
+            "anzahl_gutschriften": int(cluster.get("anzahl_gutschriften") or 0),
+            "anzahl_dokumente": int(cluster.get("anzahl_dokumente") or 0),
+            "rechnung_summe_brutto": round(to_float_safe(cluster.get("rechnung_summe_brutto")), 2),
+            "gutschrift_summe_brutto": round(to_float_safe(cluster.get("gutschrift_summe_brutto")), 2),
+            "nettoeffekt_brutto": round(to_float_safe(cluster.get("nettoeffekt_brutto")), 2),
+            "kostenstruktur": {
+                "material_brutto": material,
+                "subunternehmer_brutto": subunternehmer,
+                "sonstiges_brutto": sonstiges,
+            },
+            "zugeordnete_rechnungsnummern": unique_nonempty(cluster.get("zugeordnete_rechnungsnummern") or []),
+        })
+
+    out.sort(key=lambda x: x.get("nettoeffekt_brutto", 0), reverse=True)
+    return out
 
 def build_hinweis_breakdown(hinweise):
     counter = Counter()
@@ -2981,6 +2718,52 @@ def build_fachliche_hinweis_details(fachliche_hinweise, rechnung_map):
     details.sort(key=lambda x: (x["brutto_summe"], x["hinweis_typ"]), reverse=True)
     return details
 
+def build_lieferanten_kontext_map(lieferanten_kontext):
+    result = {}
+
+    for row in (lieferanten_kontext or []):
+        lieferant_id = str(
+            row.get("lieferant_id")
+            or row.get("Lieferant_ID")
+            or row.get("id")
+            or row.get("ID")
+            or ""
+        ).strip()
+
+        lieferant_name = str(
+            row.get("lieferant_name")
+            or row.get("Lieferant_Name")
+            or row.get("name")
+            or row.get("Name")
+            or ""
+        ).strip()
+
+        kategorie = str(
+            row.get("lieferantenkategorie")
+            or row.get("Lieferantenkategorie")
+            or row.get("kategorie")
+            or row.get("Kategorie")
+            or row.get("typ")
+            or row.get("Typ")
+            or ""
+        ).strip().lower()
+
+        canonical = canonical_lieferanten_kategorie(kategorie)
+
+        entry = {
+            "lieferant_id": lieferant_id,
+            "lieferant_name": lieferant_name,
+            "lieferantenkategorie": canonical,
+        }
+
+        if lieferant_id:
+            result[lieferant_id] = entry
+        if lieferant_name:
+            result[lieferant_name] = entry
+
+    return result
+
+
 def build_gutschrift_details(gutschriften, lookup_rechnungen):
     by_rechnungsnummer = {}
     for r in lookup_rechnungen:
@@ -3019,6 +2802,7 @@ def build_gutschrift_details(gutschriften, lookup_rechnungen):
 
     details.sort(key=lambda x: abs(x["brutto_summe"]), reverse=True)
     return details
+
 
 def build_wichtige_faelle(fachliche_hinweis_details, gutschrift_details):
     typ_prio = {
@@ -3071,6 +2855,20 @@ def build_wichtige_faelle(fachliche_hinweis_details, gutschrift_details):
     faelle.sort(key=lambda x: (x["prioritaet"], abs(x["betrag"])), reverse=True)
     return faelle[:10]
 
+
+def build_project_report_meta(projekt_cluster_report):
+    sorted_items = sorted(
+        list(projekt_cluster_report or []),
+        key=lambda x: x.get("nettoeffekt_brutto", 0),
+        reverse=True
+    )
+
+    return {
+        "anzahl_projekte": len(sorted_items),
+        "top_3_nach_nettoeffekt_brutto": sorted_items[:3],
+    }
+
+
 def build_email_summary(summary, fachlicher_breakdown, payment, top_lieferanten, meta_report_type):
     parts = []
 
@@ -3113,179 +2911,6 @@ def build_email_summary(summary, fachlicher_breakdown, payment, top_lieferanten,
         )
 
     return " ".join(parts).strip()
-    
-def normalize_lieferant_typ(value):
-    s = normalize_text_basic(value)
-    if not s:
-        return ""
-
-    if "sub" in s and "unternehmer" in s:
-        return "SUBUNTERNEHMER"
-    if "gross" in s and "haendler" in s:
-        return "GROSSHAENDLER"
-    if "groß" in str(value or "").lower() and "händler" in str(value or "").lower():
-        return "GROSSHAENDLER"
-    if "grosshandel" in s or "großhandel" in str(value or "").lower():
-        return "GROSSHAENDLER"
-    if "hersteller" in s:
-        return "HERSTELLER"
-    if "dienst" in s:
-        return "DIENSTLEISTER"
-    if "handwerker" in s:
-        return "HANDWERKER"
-    if "sonst" in s:
-        return "SONSTIGES"
-
-    return str(value or "").strip().upper()
-
-def build_lieferanten_kontext(lieferantenregeln):
-    result = {}
-
-    for row in lieferantenregeln:
-        lieferant_id = str(
-            row.get("lieferant_id")
-            or row.get("Lieferant_ID")
-            or ""
-        ).strip()
-
-        lieferant_name = str(
-            row.get("lieferant_name")
-            or row.get("Lieferant_Name")
-            or ""
-        ).strip()
-
-        key = lieferant_id or lieferant_name
-        if not key:
-            continue
-
-        lieferant_typ = normalize_lieferant_typ(
-            row.get("lieferantentyp")
-            or row.get("Lieferantentyp")
-            or row.get("lieferanten_typ")
-            or row.get("Lieferanten_Typ")
-            or row.get("kategorie")
-            or row.get("Kategorie")
-            or ""
-        )
-
-        result[key] = {
-            "lieferant_id": lieferant_id,
-            "lieferant_name": lieferant_name or key,
-            "lieferant_typ": lieferant_typ,
-        }
-
-    return result
-
-def resolve_lieferant_typ_for_rechnung(r, lieferanten_kontext):
-    lieferant_id = str(
-        r.get("lieferant_id")
-        or r.get("Lieferant_ID")
-        or ""
-    ).strip()
-
-    lieferant_name = get_lieferant_name(r)
-
-    if lieferant_id and lieferant_id in lieferanten_kontext:
-        return lieferanten_kontext[lieferant_id].get("lieferant_typ", "")
-
-    if lieferant_name and lieferant_name in lieferanten_kontext:
-        return lieferanten_kontext[lieferant_name].get("lieferant_typ", "")
-
-    return ""
-
-def map_lieferant_typ_to_kostenblock(lieferant_typ):
-    lt = str(lieferant_typ or "").strip().upper()
-
-    if lt == "SUBUNTERNEHMER":
-        return "SUBUNTERNEHMER"
-    if lt in ("GROSSHAENDLER", "HERSTELLER"):
-        return "MATERIAL"
-    if lt in ("DIENSTLEISTER", "HANDWERKER", "SONSTIGES"):
-        return "SONSTIGES"
-
-    return "SONSTIGES"
-
-def build_projekt_cluster_report(projekt_cluster, cluster_input, lieferanten_kontext):
-    rechnung_by_id = {}
-
-    for r in cluster_input:
-        rid = get_rechnung_id(r)
-        if rid:
-            rechnung_by_id[rid] = r
-
-    result = []
-
-    for p in projekt_cluster:
-        material_summe = 0.0
-        subunternehmer_summe = 0.0
-        sonstiges_summe = 0.0
-
-        rechnung_summe_brutto = to_float_safe(p.get("rechnung_summe_brutto"))
-        gutschrift_summe_brutto = to_float_safe(p.get("gutschrift_summe_brutto"))
-        nettoeffekt_brutto = to_float_safe(p.get("nettoeffekt_brutto"))
-
-        zugeordnete_ids = p.get("zugeordnete_rechnung_ids", []) or []
-
-        for rid in zugeordnete_ids:
-            r = rechnung_by_id.get(str(rid).strip())
-            if not r:
-                continue
-
-            dokumenttyp = get_dokumenttyp(r)
-            if dokumenttyp != "RECHNUNG":
-                continue
-
-            brutto = get_brutto_summe(r)
-            lieferant_typ = resolve_lieferant_typ_for_rechnung(r, lieferanten_kontext)
-            kostenblock = map_lieferant_typ_to_kostenblock(lieferant_typ)
-
-            if kostenblock == "MATERIAL":
-                material_summe += brutto
-            elif kostenblock == "SUBUNTERNEHMER":
-                subunternehmer_summe += brutto
-            else:
-                sonstiges_summe += brutto
-
-        projekt_name = str(p.get("projekt_name_report") or "").strip()
-        erkannte_baustelle = str(p.get("erkannte_baustelle") or "").strip()
-        erkannte_kostenstelle = str(p.get("erkannte_kostenstelle") or "").strip()
-        erkannte_kommission = str(p.get("erkannte_kommission") or "").strip()
-        status = str(p.get("status") or "").strip()
-        confidence = to_float_safe(p.get("confidence"))
-
-        if confidence < 0.75:
-            if erkannte_baustelle:
-                projekt_name = erkannte_baustelle
-            elif erkannte_kostenstelle and not is_generic_kostenstelle(erkannte_kostenstelle):
-                projekt_name = erkannte_kostenstelle
-            elif erkannte_kommission and is_full_person_name(erkannte_kommission):
-                projekt_name = erkannte_kommission
-            else:
-                projekt_name = ""
-
-        result.append({
-            "projekt_name": projekt_name,
-            "erkannte_baustelle": erkannte_baustelle,
-            "erkannte_kostenstelle": erkannte_kostenstelle,
-            "erkannte_kommission": erkannte_kommission,
-            "status": status,
-            "confidence": confidence,
-            "anzahl_rechnungen": int(p.get("anzahl_rechnungen") or 0),
-            "anzahl_gutschriften": int(p.get("anzahl_gutschriften") or 0),
-            "anzahl_dokumente": int(p.get("anzahl_dokumente") or 0),
-            "rechnung_summe_brutto": round(rechnung_summe_brutto, 2),
-            "gutschrift_summe_brutto": round(gutschrift_summe_brutto, 2),
-            "nettoeffekt_brutto": round(nettoeffekt_brutto, 2),
-            "kostenstruktur": {
-                "material_brutto": round(material_summe, 2),
-                "subunternehmer_brutto": round(subunternehmer_summe, 2),
-                "sonstiges_brutto": round(sonstiges_summe, 2),
-            },
-            "zugeordnete_rechnung_ids": zugeordnete_ids,
-        })
-
-    result.sort(key=lambda x: x.get("nettoeffekt_brutto", 0), reverse=True)
-    return result
 
 @app.route("/analyze", methods=["POST"])
 def analyze():
@@ -3299,10 +2924,9 @@ def analyze():
         rechnungen = data.get("rechnungen", []) or []
         hinweise = data.get("hinweise", []) or []
         historische_rechnungen = data.get("historische_rechnungen", []) or []
-        lieferantenregeln = data.get("lieferantenregeln", []) or []
+        lieferanten_kontext = data.get("lieferanten_kontext", []) or []
 
         betriebskontext = data.get("betriebskontext", {}) or {}
-
         if "kommission_pruefen" not in betriebskontext:
             betriebskontext["kommission_pruefen"] = True
 
@@ -3316,9 +2940,8 @@ def analyze():
                 rechnung_map[rid] = r
 
         lookup_rechnungen = list(rechnungen) + list(historische_rechnungen)
-        lieferanten_kontext = build_lieferanten_kontext(lieferantenregeln)
+        lieferanten_kontext_map = build_lieferanten_kontext_map(lieferanten_kontext)
 
-        # Hinweise klassifizieren
         fachliche_hinweise = []
         technische_hinweise = []
 
@@ -3370,17 +2993,28 @@ def analyze():
         payment = build_payment_section(rechnungen_nur, zeitraum_ende)
         top_lieferanten = build_top_lieferanten(rechnungen)
 
-        cluster_input = list(rechnungen)
-        if historische_rechnungen:
-            cluster_input.extend(historische_rechnungen)
-
-        projekt_cluster = build_project_clusters(cluster_input)
-        projekt_cluster_report = build_projekt_cluster_report(
-            projekt_cluster=projekt_cluster,
-            cluster_input=cluster_input,
-            lieferanten_kontext=lieferanten_kontext
+        projekt_cluster = build_project_clusters(
+            rechnungen=rechnungen,
+            historische_rechnungen=historische_rechnungen,
+            lieferanten_kontext_map=lieferanten_kontext_map,
         )
-        unklare_projekte = [x for x in projekt_cluster if x.get("confidence", 0) < 0.75][:20]
+
+        projekt_cluster_report = build_project_report(
+            projekt_cluster=projekt_cluster,
+            rechnung_lookup=lookup_rechnungen,
+            lieferanten_kontext_map=lieferanten_kontext_map,
+        )
+
+        projekt_cluster_report_top10 = sorted(
+            projekt_cluster_report,
+            key=lambda x: x.get("nettoeffekt_brutto", 0),
+            reverse=True
+        )[:10]
+
+        unklare_projekte = [
+            x for x in projekt_cluster
+            if x.get("confidence", 0) < 0.75
+        ][:20]
 
         fachliche_hinweis_details = build_fachliche_hinweis_details(fachliche_hinweise, rechnung_map)
         gutschrift_details = build_gutschrift_details(gutschriften, lookup_rechnungen)
@@ -3419,6 +3053,10 @@ def analyze():
             "lieferanten": {
                 "top_lieferanten": top_lieferanten
             },
+            "lieferanten_kontext": {
+                "anzahl": len(lieferanten_kontext),
+                "eintraege": lieferanten_kontext[:50],
+            },
             "gutschriften": {
                 "anzahl": len(gutschriften),
                 "summe_brutto": round(sum(get_brutto_summe(r) for r in gutschriften), 2),
@@ -3426,14 +3064,7 @@ def analyze():
             },
             "projekt_cluster": projekt_cluster,
             "projekt_cluster_report": projekt_cluster_report,
-            "projekt_report_meta": {
-                "anzahl_projekte": len(projekt_cluster_report),
-                "top_3_nach_nettoeffekt_brutto": projekt_cluster_report[:3]
-            },
-            "lieferanten_kontext": {
-                "anzahl": len(lieferanten_kontext),
-                "eintraege": list(lieferanten_kontext.values())
-            },
+            "projekt_report_meta": build_project_report_meta(projekt_cluster_report),
             "payment": payment,
             "report_highlights": {
                 "wichtigste_faelle": wichtige_faelle
@@ -3442,7 +3073,7 @@ def analyze():
             "optional_details": {
                 "fachliche_hinweise_details": fachliche_hinweis_details[:25],
                 "unklare_projektzuordnungen": unklare_projekte,
-                "projekt_cluster_report_top10": projekt_cluster_report[:10],
+                "projekt_cluster_report_top10": projekt_cluster_report_top10,
             },
             "internal_diagnostics": {
                 "technische_hinweise_anzahl": len(technische_hinweise),
