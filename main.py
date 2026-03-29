@@ -3180,8 +3180,10 @@ def analyze():
                 "betrieb_id": betrieb_id,
                 "zeitraum_start": str(zeitraum_start) if zeitraum_start else str(zeitraum.get("start") or ""),
                 "zeitraum_ende": str(zeitraum_ende) if zeitraum_ende else str(zeitraum.get("ende") or ""),
-                "generated_at": datetime.utcnow().isoformat() + "Z"
+                "generated_at": datetime.utcnow().isoformat() + "Z",
+                "analyze_version": "v4-orphan-test-1"
             },
+
             "summary": summary,
             "verarbeitung": {
                 "geprueft": summary["geprueft"],
