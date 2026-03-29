@@ -1967,6 +1967,29 @@ def get_eingangsdatum(r):
         r.get("eingangsdatum")
         or r.get("Eingangsdatum")
     )
+    
+def get_report_relevantes_datum(r):
+    return get_eingangsdatum(r) or get_rechnungsdatum(r)
+
+def is_im_zeitraum(d, zeitraum_start, zeitraum_ende):
+    if not d:
+        return False
+    if zeitraum_start and d < zeitraum_start:
+        return False
+    if zeitraum_ende and d > zeitraum_ende:
+        return False
+    return True
+
+def filter_rechnungen_fuer_report(rechnungen, zeitraum_start, zeitraum_ende):
+    if not zeitraum_start and not zeitraum_ende:
+        return list(rechnungen or [])
+
+    out = []
+    for r in (rechnungen or []):
+        d = get_report_relevantes_datum(r)
+        if is_im_zeitraum(d, zeitraum_start, zeitraum_ende):
+            out.append(r)
+    return out
 
 def get_skonto_prozent(r):
     return to_float_safe(
@@ -2888,7 +2911,7 @@ def analyze():
         zeitraum_start = parse_date_safe(zeitraum.get("start"))
         zeitraum_ende = parse_date_safe(zeitraum.get("ende"))
 
-       rechnungen_report = filter_rechnungen_fuer_report(
+        rechnungen_report = filter_rechnungen_fuer_report(
             rechnungen=rechnungen,
             zeitraum_start=zeitraum_start,
             zeitraum_ende=zeitraum_ende,
