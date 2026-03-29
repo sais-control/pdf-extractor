@@ -1458,7 +1458,7 @@ def extract_pdf():
         }), 200
         
 # ============================================================
-# ANALYZE HELPERS / REPORT LOGIK V3
+# ANALYZE HELPERS / REPORT LOGIK V4
 # ============================================================
 
 KANON_HINWEIS_TYPEN = [
@@ -1530,20 +1530,28 @@ LIEFERANTEN_TYP_MAPPING = {
     "GROSSHÄNDLER": "material",
     "GROSSHANDEL": "material",
     "FACHGROSSHANDEL": "material",
+    "HANDEL": "material",
+    "HANDEL_ALLGEMEIN": "material",
     "HERSTELLER": "material",
     "LIEFERANT": "material",
     "MATERIAL": "material",
+
     "SUBUNTERNEHMER": "subunternehmer",
     "NACHUNTERNEHMER": "subunternehmer",
     "DIENSTLEISTER": "subunternehmer",
+    "SERVICE": "subunternehmer",
     "HANDWERKER": "subunternehmer",
     "ELEKTRIKER": "subunternehmer",
     "MONTEUR": "subunternehmer",
+
     "SONSTIGES": "sonstiges",
     "FUHRPARK": "sonstiges",
     "MIETE": "sonstiges",
     "TRANSPORT": "sonstiges",
     "ENTSORGUNG": "sonstiges",
+    "FIXKOSTEN": "sonstiges",
+    "WERKSTATT": "sonstiges",
+    "ARBEITSKLEIDUNG": "sonstiges",
 }
 
 def normalize_text_basic(value):
@@ -1697,18 +1705,6 @@ def is_full_person_name(value):
 
     return True
 
-def looks_like_company_address(value):
-    s = normalize_text_basic(value)
-    if not s:
-        return False
-
-    company_markers = [
-        "gmbh", "mbh", "ug", "gbr", "kg", "ag", "ohg",
-        "gebaeudetechnik", "haustechnik", "elektro", "sanitaer",
-        "heizung", "klima", "technik"
-    ]
-    return any(m in s for m in company_markers)
-
 def text_similarity(a, b):
     a = normalize_name(a)
     b = normalize_name(b)
@@ -1809,14 +1805,37 @@ def canonical_dokumenttyp(value):
         return "GUTSCHRIFT"
     return "RECHNUNG"
 
-def canonical_lieferant_typ(value):
+def canonical_lieferanten_kategorie(value):
     s = str(value or "").strip().upper()
+
     if not s:
-        return ""
-    return s
+        return "SONSTIGES"
+
+    mapping = {
+        "GROSSHAENDLER": "GROSSHANDEL",
+        "GROSSHÄNDLER": "GROSSHANDEL",
+        "GROSSHANDEL": "GROSSHANDEL",
+        "FACHGROSSHANDEL": "GROSSHANDEL",
+        "HANDEL": "GROSSHANDEL",
+        "HANDEL_ALLGEMEIN": "GROSSHANDEL",
+
+        "SUBUNTERNEHMER": "SUBUNTERNEHMER",
+        "SUB": "SUBUNTERNEHMER",
+
+        "DIENSTLEISTER": "DIENSTLEISTER",
+        "SERVICE": "DIENSTLEISTER",
+
+        "HERSTELLER": "HERSTELLER",
+        "FIXKOSTEN": "FIXKOSTEN",
+        "WERKSTATT": "WERKSTATT",
+        "ARBEITSKLEIDUNG": "ARBEITSKLEIDUNG",
+        "SONSTIGES": "SONSTIGES",
+    }
+
+    return mapping.get(s, s)
 
 def map_lieferant_typ_to_kategorie(value):
-    s = canonical_lieferant_typ(value)
+    s = canonical_lieferanten_kategorie(value)
     return LIEFERANTEN_TYP_MAPPING.get(s, "sonstiges")
 
 def get_rechnung_id(r):
@@ -1834,13 +1853,13 @@ def get_rechnungsnummer(r):
         or r.get("Rechnungsnummer")
         or ""
     ).strip()
-    
+
 def get_dokumenttyp(r):
-    return str(
+    return canonical_dokumenttyp(
         r.get("dokumenttyp")
         or r.get("Dokumenttyp")
         or ""
-    ).strip().upper()
+    )
 
 def get_lieferant_name(r):
     return str(
@@ -1861,11 +1880,13 @@ def get_lieferant_id(r):
     ).strip()
 
 def get_lieferant_typ_from_rechnung(r):
-    return canonical_lieferant_typ(
+    return canonical_lieferanten_kategorie(
         r.get("lieferant_typ")
         or r.get("Lieferant_Typ")
         or r.get("lieferanten_typ")
         or r.get("Lieferanten_Typ")
+        or r.get("lieferantenkategorie")
+        or r.get("Lieferantenkategorie")
         or r.get("kategorie")
         or r.get("Kategorie")
         or ""
@@ -1876,12 +1897,11 @@ def get_lieferant_typ_from_kontext_map(r, lieferanten_kontext_map):
     lname = get_lieferant_name(r)
 
     if lid and lid in lieferanten_kontext_map:
-        return canonical_lieferant_typ(lieferanten_kontext_map[lid].get("lieferant_typ"))
+        return canonical_lieferanten_kategorie(lieferanten_kontext_map[lid].get("lieferant_typ"))
 
-    lname_norm = normalize_name(lname)
-    for _, entry in lieferanten_kontext_map.items():
-        if normalize_name(entry.get("lieferant_name")) == lname_norm:
-            return canonical_lieferant_typ(entry.get("lieferant_typ"))
+    lname_key = f"NAME::{normalize_name(lname)}"
+    if lname_key in lieferanten_kontext_map:
+        return canonical_lieferanten_kategorie(lieferanten_kontext_map[lname_key].get("lieferant_typ"))
 
     return ""
 
@@ -1907,17 +1927,6 @@ def get_gesamtbewertung(r):
         or r.get("Gesamtbewertung")
         or ""
     )
-
-def get_hinweise_anzahl_rechnung(r):
-    v = (
-        r.get("hinweise_anzahl")
-        or r.get("Hinweise_Anzahl")
-        or 0
-    )
-    try:
-        return int(v)
-    except:
-        return 0
 
 def get_brutto_summe(r):
     return to_float_safe(
@@ -2122,112 +2131,62 @@ def extract_project_features(r):
         "projekt_text_norm": normalize_name(projekt_text_raw),
         "kostenstelle_generisch": is_generic_kostenstelle(kostenstelle_raw),
     }
-    
-def canonical_lieferanten_kategorie(value):
-    s = str(value or "").strip().upper()
-
-    if not s:
-        return "SONSTIGES"
-
-    mapping = {
-        "GROSSHANDEL": "GROSSHANDEL",
-        "GROSSHANDEL": "GROSSHANDEL",
-        "HANDEL": "GROSSHANDEL",
-        "HANDEL_ALLGEMEIN": "GROSSHANDEL",
-
-        "SUBUNTERNEHMER": "SUBUNTERNEHMER",
-        "SUB": "SUBUNTERNEHMER",
-
-        "DIENSTLEISTER": "DIENSTLEISTER",
-        "SERVICE": "DIENSTLEISTER",
-
-        "HERSTELLER": "HERSTELLER",
-
-        "FIXKOSTEN": "FIXKOSTEN",
-
-        "WERKSTATT": "WERKSTATT",
-
-        "ARBEITSKLEIDUNG": "ARBEITSKLEIDUNG",
-
-        "SONSTIGES": "SONSTIGES",
-    }
-
-    return mapping.get(s, s)
 
 def build_lieferanten_kontext_map(lieferanten_kontext):
     result = {}
 
-    for item in (lieferanten_kontext or []):
+    for row in (lieferanten_kontext or []):
         lieferant_id = str(
-            item.get("lieferant_id")
-            or item.get("Lieferant_ID")
+            row.get("lieferant_id")
+            or row.get("Lieferant_ID")
+            or row.get("id")
+            or row.get("ID")
             or ""
         ).strip()
 
         lieferant_name = str(
-            item.get("lieferant_name")
-            or item.get("Lieferant_Name")
+            row.get("lieferant_name")
+            or row.get("Lieferant_Name")
+            or row.get("name")
+            or row.get("Name")
             or ""
         ).strip()
 
-        lieferant_typ = str(
-            item.get("lieferant_typ")
-            or item.get("Lieferant_Typ")
-            or item.get("kategorie")
-            or item.get("Kategorie")
+        raw_typ = str(
+            row.get("lieferant_typ")
+            or row.get("Lieferant_Typ")
+            or row.get("lieferantenkategorie")
+            or row.get("Lieferantenkategorie")
+            or row.get("kategorie")
+            or row.get("Kategorie")
+            or row.get("typ")
+            or row.get("Typ")
             or ""
         ).strip()
+
+        canonical_typ = canonical_lieferanten_kategorie(raw_typ)
 
         entry = {
             "lieferant_id": lieferant_id,
             "lieferant_name": lieferant_name,
-            "lieferant_typ": lieferant_typ,
+            "lieferant_typ": canonical_typ,
+            "lieferantenkategorie": canonical_typ,
+            "kosten_kategorie": map_lieferant_typ_to_kategorie(canonical_typ),
         }
 
         if lieferant_id:
             result[lieferant_id] = entry
-        elif lieferant_name:
+
+        if lieferant_name:
             result[f"NAME::{normalize_name(lieferant_name)}"] = entry
 
     return result
 
-def build_lieferanten_kontext_output(lieferanten_kontext):
-    out = []
-
-    for item in (lieferanten_kontext or []):
-        lieferant_id = str(
-            item.get("lieferant_id")
-            or item.get("Lieferant_ID")
-            or ""
-        ).strip()
-
-        lieferant_name = str(
-            item.get("lieferant_name")
-            or item.get("Lieferant_Name")
-            or ""
-        ).strip()
-
-        lieferant_typ = str(
-            item.get("lieferant_typ")
-            or item.get("Lieferant_Typ")
-            or item.get("kategorie")
-            or item.get("Kategorie")
-            or ""
-        ).strip()
-
-        out.append({
-            "lieferant_id": lieferant_id,
-            "lieferant_name": lieferant_name,
-            "lieferant_typ": lieferant_typ,
-            "kosten_kategorie": map_lieferant_typ_to_kategorie(lieferant_typ),
-        })
-
-    out.sort(key=lambda x: (x["lieferant_name"], x["lieferant_id"]))
-    return out
-
-def build_project_clusters(rechnungen, lieferanten_kontext_map=None):
+def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_kontext_map=None):
+    historische_rechnungen = historische_rechnungen or []
     lieferanten_kontext_map = lieferanten_kontext_map or {}
 
+    all_docs = list(rechnungen) + list(historische_rechnungen)
     prepared = []
 
     def is_lager_item(feat):
@@ -2253,7 +2212,7 @@ def build_project_clusters(rechnungen, lieferanten_kontext_map=None):
 
         return {
             "rechnungen": [rechnung],
-            "rechnung_ids": [get_rechnung_id(rechnung)],
+            "rechnung_ids": [get_rechnung_id(rechnung)] if get_rechnung_id(rechnung) else [],
             "rechnungsnummern": [get_rechnungsnummer(rechnung)] if get_rechnungsnummer(rechnung) else [],
             "kostenstelle_values": [feat["kostenstelle_raw"]] if feat["kostenstelle_raw"] else [],
             "kommission_values": [feat["kommission_raw"]] if feat["kommission_raw"] else [],
@@ -2348,7 +2307,6 @@ def build_project_clusters(rechnungen, lieferanten_kontext_map=None):
     def can_attach_orphan_to_cluster(item, cluster):
         feat = item["feat"]
 
-        # 1) harte Kostenstelle
         if (
             feat["kostenstelle_norm"]
             and not feat["kostenstelle_generisch"]
@@ -2356,7 +2314,6 @@ def build_project_clusters(rechnungen, lieferanten_kontext_map=None):
         ):
             return "KOSTENSTELLE_NACHGEZOGEN"
 
-        # 2) eindeutige Personen-Kommission
         if feat["kommission_norm"] and is_full_person_name(feat["kommission_raw"]):
             for existing_norm in cluster["kommission_norms"]:
                 if strict_person_match(feat["kommission_norm"], existing_norm):
@@ -2397,14 +2354,11 @@ def build_project_clusters(rechnungen, lieferanten_kontext_map=None):
         if a["is_lager"] and b["is_lager"]:
             return True
 
-        a_address = choose_best_value(a["baustelle_values"])
-        b_address = choose_best_value(b["baustelle_values"])
         a_kommission = normalize_person_name_for_match(choose_best_value(a["kommission_values"]))
         b_kommission = normalize_person_name_for_match(choose_best_value(b["kommission_values"]))
         a_kostenstelle = choose_best_value(a["kostenstelle_values"])
         b_kostenstelle = choose_best_value(b["kostenstelle_values"])
 
-        # gleiche/nahe Adresse
         address_match = False
         if a["address_keys"] and b["address_keys"]:
             for ka in a["address_keys"]:
@@ -2415,14 +2369,12 @@ def build_project_clusters(rechnungen, lieferanten_kontext_map=None):
                 if address_match:
                     break
 
-        # gleiche starke Kostenstelle
         strong_kostenstelle_match = False
         if a_kostenstelle and b_kostenstelle:
             if (not is_generic_kostenstelle(a_kostenstelle)) and (not is_generic_kostenstelle(b_kostenstelle)):
                 if normalize_code(a_kostenstelle) == normalize_code(b_kostenstelle):
                     strong_kostenstelle_match = True
 
-        # gleiche Personen-Kommission
         person_match = False
         if a_kommission and b_kommission:
             if is_full_person_name(a_kommission) and is_full_person_name(b_kommission):
@@ -2432,8 +2384,7 @@ def build_project_clusters(rechnungen, lieferanten_kontext_map=None):
         if address_match and (strong_kostenstelle_match or person_match):
             return True
 
-        # Spezialfall: gleiche echte Adresse, eine Seite mit Kostenstelle, andere ohne
-        if address_match and (a_address or b_address):
+        if address_match:
             return True
 
         return False
@@ -2479,8 +2430,6 @@ def build_project_clusters(rechnungen, lieferanten_kontext_map=None):
             projekt_name_report = kostenstelle
         elif kommission:
             projekt_name_report = kommission
-        else:
-            projekt_name_report = ""
 
         return {
             "projekt_cluster_id": f"PC_{idx:04d}",
@@ -2501,10 +2450,12 @@ def build_project_clusters(rechnungen, lieferanten_kontext_map=None):
             "zugeordnete_rechnungsnummern": unique_nonempty(cluster["rechnungsnummern"]),
             "match_hinweise": sorted(list(set(cluster["match_hinweise"]))),
             "offen_unterbestimmt": False,
+            "kostenstruktur_material_brutto": round(cluster["kostenstruktur_material_brutto"], 2),
+            "kostenstruktur_subunternehmer_brutto": round(cluster["kostenstruktur_subunternehmer_brutto"], 2),
+            "kostenstruktur_sonstiges_brutto": round(cluster["kostenstruktur_sonstiges_brutto"], 2),
         }
 
-    # vorbereiten
-    for r in rechnungen:
+    for r in all_docs:
         feat = extract_project_features(r)
         prepared.append({
             "rechnung": r,
@@ -2515,7 +2466,6 @@ def build_project_clusters(rechnungen, lieferanten_kontext_map=None):
     orphan_items = []
     lager_cluster = None
 
-    # Phase 1: adressbasierte Cluster
     for item in prepared:
         feat = item["feat"]
 
@@ -2539,7 +2489,6 @@ def build_project_clusters(rechnungen, lieferanten_kontext_map=None):
         else:
             orphan_items.append(item)
 
-    # Phase 2: adresslose Fälle nur vorsichtig nachziehen
     standalone_clusters = []
 
     for item in orphan_items:
@@ -2561,7 +2510,6 @@ def build_project_clusters(rechnungen, lieferanten_kontext_map=None):
         all_clusters.append(lager_cluster)
     all_clusters.extend(standalone_clusters)
 
-    # Phase 3: Cluster zusammenführen
     changed = True
     while changed:
         changed = False
@@ -2595,8 +2543,10 @@ def build_project_clusters(rechnungen, lieferanten_kontext_map=None):
     result.sort(key=lambda x: x.get("nettoeffekt_brutto", 0), reverse=True)
     return result
 
-def build_project_report_list(projekt_cluster, lieferanten_kontext_map=None):
+def build_project_report(projekt_cluster, rechnung_lookup=None, lieferanten_kontext_map=None):
+    rechnung_lookup = rechnung_lookup or []
     lieferanten_kontext_map = lieferanten_kontext_map or {}
+
     out = []
 
     for cluster in projekt_cluster:
@@ -2756,52 +2706,6 @@ def build_fachliche_hinweis_details(fachliche_hinweise, rechnung_map):
     details.sort(key=lambda x: (x["brutto_summe"], x["hinweis_typ"]), reverse=True)
     return details
 
-def build_lieferanten_kontext_map(lieferanten_kontext):
-    result = {}
-
-    for row in (lieferanten_kontext or []):
-        lieferant_id = str(
-            row.get("lieferant_id")
-            or row.get("Lieferant_ID")
-            or row.get("id")
-            or row.get("ID")
-            or ""
-        ).strip()
-
-        lieferant_name = str(
-            row.get("lieferant_name")
-            or row.get("Lieferant_Name")
-            or row.get("name")
-            or row.get("Name")
-            or ""
-        ).strip()
-
-        kategorie = str(
-            row.get("lieferantenkategorie")
-            or row.get("Lieferantenkategorie")
-            or row.get("kategorie")
-            or row.get("Kategorie")
-            or row.get("typ")
-            or row.get("Typ")
-            or ""
-        ).strip().lower()
-
-        canonical = canonical_lieferanten_kategorie(kategorie)
-
-        entry = {
-            "lieferant_id": lieferant_id,
-            "lieferant_name": lieferant_name,
-            "lieferantenkategorie": canonical,
-        }
-
-        if lieferant_id:
-            result[lieferant_id] = entry
-        if lieferant_name:
-            result[lieferant_name] = entry
-
-    return result
-
-
 def build_gutschrift_details(gutschriften, lookup_rechnungen):
     by_rechnungsnummer = {}
     for r in lookup_rechnungen:
@@ -2840,7 +2744,6 @@ def build_gutschrift_details(gutschriften, lookup_rechnungen):
 
     details.sort(key=lambda x: abs(x["brutto_summe"]), reverse=True)
     return details
-
 
 def build_wichtige_faelle(fachliche_hinweis_details, gutschrift_details):
     typ_prio = {
@@ -2893,7 +2796,6 @@ def build_wichtige_faelle(fachliche_hinweis_details, gutschrift_details):
     faelle.sort(key=lambda x: (x["prioritaet"], abs(x["betrag"])), reverse=True)
     return faelle[:10]
 
-
 def build_project_report_meta(projekt_cluster_report):
     sorted_items = sorted(
         list(projekt_cluster_report or []),
@@ -2905,7 +2807,6 @@ def build_project_report_meta(projekt_cluster_report):
         "anzahl_projekte": len(sorted_items),
         "top_3_nach_nettoeffekt_brutto": sorted_items[:3],
     }
-
 
 def build_email_summary(summary, fachlicher_breakdown, payment, top_lieferanten, meta_report_type):
     parts = []
@@ -2955,7 +2856,6 @@ def analyze():
     try:
         data = request.get_json() or {}
 
-        # === META / INPUT MAPPING (angepasst an dein Make JSON) ===
         meta = data.get("meta", {}) or {}
 
         mode = (
@@ -2975,24 +2875,39 @@ def analyze():
             "ende": meta.get("zeitraum_ende") or "",
         }
 
-        # === HAUPTDATEN ===
         rechnungen = data.get("rechnungen", []) or []
         hinweise = data.get("hinweise", []) or []
         historische_rechnungen = data.get("historische_rechnungen", []) or []
 
-        # === KONTEXT ===
         betriebskontext = data.get("betriebskontext", {}) or {}
         lieferanten_kontext = data.get("lieferanten_kontext", []) or []
 
         if "kommission_pruefen" not in betriebskontext:
             betriebskontext["kommission_pruefen"] = True
 
-        # === DATUM PARSING ===
         zeitraum_start = parse_date_safe(zeitraum.get("start"))
         zeitraum_ende = parse_date_safe(zeitraum.get("ende"))
 
+       rechnungen_report = filter_rechnungen_fuer_report(
+            rechnungen=rechnungen,
+            zeitraum_start=zeitraum_start,
+            zeitraum_ende=zeitraum_ende,
+        )
+
+        report_rechnung_ids = {
+            get_rechnung_id(r)
+            for r in rechnungen_report
+            if get_rechnung_id(r)
+        }
+
+        hinweise_report = []
+        for h in hinweise:
+            rid = str(h.get("rechnung_id") or h.get("Rechnung_ID") or "").strip()
+            if rid and rid in report_rechnung_ids:
+                hinweise_report.append(h)
+
         rechnung_map = {}
-        for r in rechnungen:
+        for r in rechnungen_report:
             rid = get_rechnung_id(r)
             if rid:
                 rechnung_map[rid] = r
@@ -3003,7 +2918,7 @@ def analyze():
         fachliche_hinweise = []
         technische_hinweise = []
 
-        for h in hinweise:
+        for h in hinweise_report:
             klasse = determine_hinweis_klasse(h, rechnung_map, betriebskontext=betriebskontext)
             h_copy = dict(h)
             h_copy["hinweis_klasse_effektiv"] = klasse
@@ -3026,21 +2941,21 @@ def analyze():
             if rid:
                 technische_hinweise_by_rechnung[rid].append(h)
 
-        rechnungen_nur = [r for r in rechnungen if is_rechnung(r)]
-        gutschriften = [r for r in rechnungen if is_gutschrift(r)]
+        rechnungen_nur = [r for r in rechnungen_report if is_rechnung(r)]
+        gutschriften = [r for r in rechnungen_report if is_gutschrift(r)]
 
         summary = {
             "rechnungen_gesamt": len(rechnungen_nur),
             "gutschriften_gesamt": len(gutschriften),
-            "geprueft": sum(1 for r in rechnungen if is_geprueft(r)),
-            "offen": sum(1 for r in rechnungen if is_offen(r)),
+            "geprueft": sum(1 for r in rechnungen_report if is_geprueft(r)),
+            "offen": sum(1 for r in rechnungen_report if is_offen(r)),
             "auffaellig": sum(1 for r in rechnungen_nur if is_rechnung_auffaellig(r)),
             "unauffaellig": sum(1 for r in rechnungen_nur if is_rechnung_unauffaellig(r)),
-            "abgelegt": sum(1 for r in rechnungen if is_abgelegt(r)),
-            "nicht_abgelegt": sum(1 for r in rechnungen if not is_abgelegt(r)),
+            "abgelegt": sum(1 for r in rechnungen_report if is_abgelegt(r)),
+            "nicht_abgelegt": sum(1 for r in rechnungen_report if not is_abgelegt(r)),
             "summe_brutto_rechnungen": round(sum(get_brutto_summe(r) for r in rechnungen_nur), 2),
             "summe_brutto_gutschriften": round(sum(get_brutto_summe(r) for r in gutschriften), 2),
-            "summe_brutto_nettoeffekt": round(sum(get_brutto_summe(r) for r in rechnungen), 2),
+            "summe_brutto_nettoeffekt": round(sum(get_brutto_summe(r) for r in rechnungen_report), 2),
             "hinweise_fachlich_gesamt": len(fachliche_hinweise),
             "hinweise_technisch_gesamt": len(technische_hinweise),
         }
@@ -3049,11 +2964,11 @@ def analyze():
         technischer_breakdown = build_hinweis_breakdown(technische_hinweise)
 
         payment = build_payment_section(rechnungen_nur, zeitraum_ende)
-        top_lieferanten = build_top_lieferanten(rechnungen)
+        top_lieferanten = build_top_lieferanten(rechnungen_report)
 
         projekt_cluster = build_project_clusters(
-            rechnungen=rechnungen,
-            historische_rechnungen=historische_rechnungen,
+            rechnungen=rechnungen_report,
+            historische_rechnungen=[],
             lieferanten_kontext_map=lieferanten_kontext_map,
         )
 
