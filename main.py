@@ -1,5 +1,5 @@
 from flask import Flask, request, jsonify
-import fitz  # PyMuPDF
+import fitz # PyMuPDF
 import pdfplumber
 import pytesseract
 from PIL import Image, ImageOps, ImageFilter
@@ -1261,7 +1261,7 @@ def extract_pdf():
                     text_full, pages = text_ocr, pages_ocr
                     text_engine = "ocr_tesseract_best"
                     ocr_used = True
-            except BaseException as e:
+            except Exception as e:
                 ocr_error = f"OCR_FAILED: {str(e)}"
 
         if not norm(text_full):
@@ -2586,6 +2586,59 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
         return ""
 
 
+    def can_merge_orphan_clusters_by_kostenstelle(a, b):
+        a_kostenstelle_values = [
+            x for x in a.get("kostenstelle_values", [])
+            if x and not is_generic_kostenstelle(x)
+        ]
+        b_kostenstelle_values = [
+            x for x in b.get("kostenstelle_values", [])
+            if x and not is_generic_kostenstelle(x)
+        ]
+
+        for av in a_kostenstelle_values:
+            for bv in b_kostenstelle_values:
+                if kostenstelle_match(av, bv):
+                    return True
+
+        for ak in a.get("kostenstelle_match_keys", set()):
+            if not ak:
+                continue
+            for bk in b.get("kostenstelle_match_keys", set()):
+                if not bk:
+                    continue
+                if kostenstelle_match(ak, bk):
+                    return True
+
+        return False
+
+
+    def can_merge_orphan_clusters_by_name(a, b):
+        a_names = [
+            x for x in a.get("kommission_values", [])
+            if x and is_full_person_name(x) and not is_noise_kommission(x)
+        ]
+        b_names = [
+            x for x in b.get("kommission_values", [])
+            if x and is_full_person_name(x) and not is_noise_kommission(x)
+        ]
+
+        for av in a_names:
+            for bv in b_names:
+                if strict_person_match(av, bv):
+                    return True
+
+        for an in a.get("kommission_norms", set()):
+            if not an:
+                continue
+            for bn in b.get("kommission_norms", set()):
+                if not bn:
+                    continue
+                if strict_person_match(an, bn):
+                    return True
+
+        return False
+
     def merge_two_clusters(a, b):
         merged = {
             "rechnungen": list(a["rechnungen"]) + list(b["rechnungen"]),
@@ -2807,16 +2860,81 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
             remaining_after_name.append(item)
 
     # --------------------------------------------------------
-    # PASS 3: Rest bleibt Einzelfall
+    # PASS 3: Rest zunächst als Einzelfall-Cluster anlegen
     # --------------------------------------------------------
     standalone_clusters = []
     for item in remaining_after_name:
         standalone_clusters.append(make_cluster_from_item(item, "EINZELFALL"))
 
+    # --------------------------------------------------------
+    # PASS 3A: Orphan-Cluster untereinander über Kostenstelle zusammenführen
+    # Nur orphanische Standalone-Cluster, niemals Adress- oder Lager-Cluster
+    # --------------------------------------------------------
+    changed_orphan = True
+    while changed_orphan:
+        changed_orphan = False
+        merged = []
+        used = set()
+
+        for i in range(len(standalone_clusters)):
+            if i in used:
+                continue
+
+            current = standalone_clusters[i]
+
+            for j in range(i + 1, len(standalone_clusters)):
+                if j in used:
+                    continue
+
+                other = standalone_clusters[j]
+
+                if can_merge_orphan_clusters_by_kostenstelle(current, other):
+                    current = merge_two_clusters(current, other)
+                    current["match_hinweise"].append("ORPHAN_KOSTENSTELLE_MERGE")
+                    used.add(j)
+                    changed_orphan = True
+
+            merged.append(current)
+
+        standalone_clusters = merged
+
+    # --------------------------------------------------------
+    # PASS 3B: Danach orphanische Standalone-Cluster über vollen Namen zusammenführen
+    # Ebenfalls nur orphanische Cluster, niemals Lager
+    # --------------------------------------------------------
+    changed_orphan = True
+    while changed_orphan:
+        changed_orphan = False
+        merged = []
+        used = set()
+
+        for i in range(len(standalone_clusters)):
+            if i in used:
+                continue
+
+            current = standalone_clusters[i]
+
+            for j in range(i + 1, len(standalone_clusters)):
+                if j in used:
+                    continue
+
+                other = standalone_clusters[j]
+
+                if can_merge_orphan_clusters_by_name(current, other):
+                    current = merge_two_clusters(current, other)
+                    current["match_hinweise"].append("ORPHAN_NAME_MERGE")
+                    used.add(j)
+                    changed_orphan = True
+
+            merged.append(current)
+
+        standalone_clusters = merged
+
     all_clusters = list(address_clusters)
     if lager_cluster is not None:
         all_clusters.append(lager_cluster)
     all_clusters.extend(standalone_clusters)
+
 
     changed = True
     while changed:
@@ -3326,7 +3444,7 @@ def analyze():
                 "zeitraum_start": str(zeitraum_start) if zeitraum_start else str(zeitraum.get("start") or ""),
                 "zeitraum_ende": str(zeitraum_ende) if zeitraum_ende else str(zeitraum.get("ende") or ""),
                 "generated_at": datetime.utcnow().isoformat() + "Z",
-                "analyze_version": "v4-orphan-test-2"
+                "analyze_version": "v4-orphan-test-3"
             },
 
             "summary": summary,
