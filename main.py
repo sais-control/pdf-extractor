@@ -2485,20 +2485,35 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
     def can_attach_orphan_to_cluster(item, cluster):
         feat = item["feat"]
 
-        if feat["kostenstelle_raw"] and not feat["kostenstelle_generisch"]:
-            for existing_key in cluster.get("kostenstelle_match_keys", set()):
-                if kostenstelle_match(feat["kostenstelle_raw"], existing_key):
+        # 1) Kostenstelle hat Vorrang
+        kostenstelle_raw = str(feat.get("kostenstelle_raw") or "").strip()
+        if kostenstelle_raw and not feat.get("kostenstelle_generisch"):
+            for existing_value in cluster.get("kostenstelle_values", []):
+                if not str(existing_value or "").strip():
+                    continue
+                if is_generic_kostenstelle(existing_value):
+                    continue
+                if kostenstelle_match(kostenstelle_raw, existing_value):
                     return "KOSTENSTELLE_NACHGEZOGEN"
 
+        # 2) Nur wenn Kostenstelle nichts gefunden hat:
+        # Name nur mit mindestens Vor- und Nachname
+        kommission_raw = str(feat.get("kommission_raw") or "").strip()
+        kommission_norm = str(feat.get("kommission_norm") or "").strip()
+
         if (
-            feat["kommission_norm"]
-            and not is_noise_kommission(feat["kommission_raw"])
-            and is_full_person_name(feat["kommission_raw"])
+            kommission_norm
+            and not is_noise_kommission(kommission_raw)
+            and is_full_person_name(kommission_raw)
         ):
-            for existing_norm in cluster["kommission_norms"]:
-                if strict_person_match(feat["kommission_norm"], existing_norm):
+            for existing_norm in cluster.get("kommission_norms", set()):
+                existing_norm = str(existing_norm or "").strip()
+                if not existing_norm:
+                    continue
+                if strict_person_match(kommission_norm, existing_norm):
                     return "KOMMISSION_NACHGEZOGEN"
 
+        # 3) Sonst kein Treffer -> später eigenes Cluster
         return ""
 
     def merge_two_clusters(a, b):
