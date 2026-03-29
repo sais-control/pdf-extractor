@@ -2205,6 +2205,68 @@ def build_lieferanten_kontext_map(lieferanten_kontext):
 
     return result
 
+def has_plausible_street_number(address_key):
+    s = str(address_key or "").strip().lower()
+    if not s:
+        return False
+
+    left = s.split("|")[0].strip()
+
+    if not re.search(r"\b\d+[a-z]?\b", left):
+        return False
+
+    street_markers = [
+        "str", "weg", "allee", "platz", "gasse", "ring", "stieg",
+        "ufer", "pfad", "trift", "weiden", "lehnhof"
+    ]
+    if not any(m in left for m in street_markers):
+        return False
+
+    return True
+
+
+def normalize_kostenstelle_match(value):
+    raw = str(value or "").strip().upper()
+    if not raw:
+        return ""
+
+    raw = raw.replace(" ", "").replace("_", "").replace("/", "").replace("\\", "").replace("-", "")
+    raw = raw.replace("Ä", "AE").replace("Ö", "OE").replace("Ü", "UE").replace("ß", "SS")
+
+    if raw in {"P1", "LAGER", "STANDARD", "INTERN", "SAMMEL"}:
+        return raw
+
+    m = re.search(r"([A-Z]*)(\d{4,})", raw)
+    if m:
+        prefix = m.group(1)
+        digits = m.group(2)
+
+        if prefix in {"P", "PA", "S"}:
+            return f"{prefix}{digits}"
+
+        return digits
+
+    return raw
+
+
+def kostenstelle_match(a, b):
+    a_norm = normalize_kostenstelle_match(a)
+    b_norm = normalize_kostenstelle_match(b)
+
+    if not a_norm or not b_norm:
+        return False
+
+    if a_norm == b_norm:
+        return True
+
+    a_digits = re.sub(r"^[A-Z]+", "", a_norm)
+    b_digits = re.sub(r"^[A-Z]+", "", b_norm)
+
+    if a_digits and b_digits and a_digits == b_digits and len(a_digits) >= 4:
+        return True
+
+    return False
+        
 def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_kontext_map=None):
     historische_rechnungen = historische_rechnungen or []
     lieferanten_kontext_map = lieferanten_kontext_map or {}
@@ -2220,7 +2282,40 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
             str(feat.get("projekt_text_raw") or "").strip().lower(),
         ]
         joined = " ".join(values)
-        return ("p1" in joined) or ("lager" in joined) or ("lagerbestand" in joined)
+
+        lager_marker = [
+            "p1", "lager", "lagerbestand", "lagerware", "lagerartikel"
+        ]
+        return any(x in joined for x in lager_marker)
+
+    def is_noise_kommission(value):
+        s = normalize_person_name_for_match(value)
+        if not s:
+            return True
+
+        bad = {
+            "webshop", "abholung", "abholer", "elements", "lager",
+            "innend", "aussend", "außend", "kunde", "projekt", "baustelle"
+        }
+        parts = [p for p in s.split() if p]
+        if not parts:
+            return True
+
+        if all(p in bad for p in parts):
+            return True
+
+        if len(parts) == 1 and parts[0] in bad:
+            return True
+
+        return False
+
+    def get_effective_address_key(feat):
+        key = str(feat.get("address_key") or "").strip()
+        if not key:
+            return ""
+        if not has_plausible_street_number(key):
+            return ""
+        return key
 
     def make_cluster_from_item(item, reason):
         feat = item["feat"]
@@ -2228,6 +2323,8 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
         brutto = get_brutto_summe(rechnung)
 
         kategorie = get_lieferant_kategorie(rechnung, lieferanten_kontext_map)
+        effective_address_key = get_effective_address_key(feat)
+        kostenstelle_match_key = normalize_kostenstelle_match(feat["kostenstelle_raw"])
 
         material = brutto if (is_rechnung(rechnung) and kategorie == "material") else 0.0
         subunternehmer = brutto if (is_rechnung(rechnung) and kategorie == "subunternehmer") else 0.0
@@ -2238,12 +2335,13 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
             "rechnung_ids": [get_rechnung_id(rechnung)] if get_rechnung_id(rechnung) else [],
             "rechnungsnummern": [get_rechnungsnummer(rechnung)] if get_rechnungsnummer(rechnung) else [],
             "kostenstelle_values": [feat["kostenstelle_raw"]] if feat["kostenstelle_raw"] else [],
-            "kommission_values": [feat["kommission_raw"]] if feat["kommission_raw"] else [],
-            "baustelle_values": [feat["baustelle_raw"]] if feat["baustelle_raw"] else [],
+            "kommission_values": [feat["kommission_raw"]] if feat["kommission_raw"] and not is_noise_kommission(feat["kommission_raw"]) else [],
+            "baustelle_values": [feat["baustelle_raw"]] if effective_address_key else [],
             "projekt_text_values": [feat["projekt_text_raw"]] if feat["projekt_text_raw"] else [],
-            "address_keys": {feat["address_key"]} if feat["address_key"] else set(),
+            "address_keys": {effective_address_key} if effective_address_key else set(),
             "kostenstelle_norms": {feat["kostenstelle_norm"]} if feat["kostenstelle_norm"] else set(),
-            "kommission_norms": {feat["kommission_norm"]} if feat["kommission_norm"] else set(),
+            "kostenstelle_match_keys": {kostenstelle_match_key} if kostenstelle_match_key else set(),
+            "kommission_norms": {feat["kommission_norm"]} if feat["kommission_norm"] and not is_noise_kommission(feat["kommission_raw"]) else set(),
             "match_hinweise": [reason],
             "is_lager": is_lager_item(feat),
             "rechnung_summe_brutto": round(brutto if is_rechnung(rechnung) else 0.0, 2),
@@ -2263,28 +2361,41 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
         brutto = get_brutto_summe(rechnung)
 
         kategorie = get_lieferant_kategorie(rechnung, lieferanten_kontext_map)
+        effective_address_key = get_effective_address_key(feat)
+        kostenstelle_match_key = normalize_kostenstelle_match(feat["kostenstelle_raw"])
 
-        if get_rechnung_id(rechnung):
-            cluster["rechnung_ids"].append(get_rechnung_id(rechnung))
-        if get_rechnungsnummer(rechnung):
-            cluster["rechnungsnummern"].append(get_rechnungsnummer(rechnung))
+        rid = get_rechnung_id(rechnung)
+        rnr = get_rechnungsnummer(rechnung)
+
+        if rid:
+            cluster["rechnung_ids"].append(rid)
+        if rnr:
+            cluster["rechnungsnummern"].append(rnr)
 
         cluster["rechnungen"].append(rechnung)
 
         if feat["kostenstelle_raw"]:
             cluster["kostenstelle_values"].append(feat["kostenstelle_raw"])
-        if feat["kommission_raw"]:
+
+        if feat["kommission_raw"] and not is_noise_kommission(feat["kommission_raw"]):
             cluster["kommission_values"].append(feat["kommission_raw"])
-        if feat["baustelle_raw"]:
+
+        if feat["baustelle_raw"] and effective_address_key:
             cluster["baustelle_values"].append(feat["baustelle_raw"])
+
         if feat["projekt_text_raw"]:
             cluster["projekt_text_values"].append(feat["projekt_text_raw"])
 
-        if feat["address_key"]:
-            cluster["address_keys"].add(feat["address_key"])
+        if effective_address_key:
+            cluster["address_keys"].add(effective_address_key)
+
         if feat["kostenstelle_norm"]:
             cluster["kostenstelle_norms"].add(feat["kostenstelle_norm"])
-        if feat["kommission_norm"]:
+
+        if kostenstelle_match_key:
+            cluster["kostenstelle_match_keys"].add(kostenstelle_match_key)
+
+        if feat["kommission_norm"] and not is_noise_kommission(feat["kommission_raw"]):
             cluster["kommission_norms"].add(feat["kommission_norm"])
 
         cluster["match_hinweise"].append(reason)
@@ -2308,15 +2419,18 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
         cluster["anzahl_dokumente"] += 1
 
     def strong_address_match(feat, cluster):
-        if not feat["address_key"] or not cluster["address_keys"]:
+        feat_key = get_effective_address_key(feat)
+        if not feat_key or not cluster["address_keys"]:
             return False
-        if feat["address_key"] in cluster["address_keys"]:
+
+        if feat_key in cluster["address_keys"]:
             return True
 
         for existing_key in cluster["address_keys"]:
-            sim = text_similarity(feat["address_key"], existing_key)
-            if sim >= 0.93:
+            sim = text_similarity(feat_key, existing_key)
+            if sim >= 0.96:
                 return True
+
         return False
 
     def strict_person_match(a, b):
@@ -2324,20 +2438,23 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
             return False
         if a == b:
             return True
+
         sim = text_similarity(a, b)
-        return sim >= 0.93
+        return sim >= 0.94
 
     def can_attach_orphan_to_cluster(item, cluster):
         feat = item["feat"]
 
-        if (
-            feat["kostenstelle_norm"]
-            and not feat["kostenstelle_generisch"]
-            and feat["kostenstelle_norm"] in cluster["kostenstelle_norms"]
-        ):
-            return "KOSTENSTELLE_NACHGEZOGEN"
+        if feat["kostenstelle_raw"] and not feat["kostenstelle_generisch"]:
+            for existing_key in cluster.get("kostenstelle_match_keys", set()):
+                if kostenstelle_match(feat["kostenstelle_raw"], existing_key):
+                    return "KOSTENSTELLE_NACHGEZOGEN"
 
-        if feat["kommission_norm"] and is_full_person_name(feat["kommission_raw"]):
+        if (
+            feat["kommission_norm"]
+            and not is_noise_kommission(feat["kommission_raw"])
+            and is_full_person_name(feat["kommission_raw"])
+        ):
             for existing_norm in cluster["kommission_norms"]:
                 if strict_person_match(feat["kommission_norm"], existing_norm):
                     return "KOMMISSION_NACHGEZOGEN"
@@ -2355,6 +2472,7 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
             "projekt_text_values": list(a["projekt_text_values"]) + list(b["projekt_text_values"]),
             "address_keys": set(a["address_keys"]) | set(b["address_keys"]),
             "kostenstelle_norms": set(a["kostenstelle_norms"]) | set(b["kostenstelle_norms"]),
+            "kostenstelle_match_keys": set(a.get("kostenstelle_match_keys", set())) | set(b.get("kostenstelle_match_keys", set())),
             "kommission_norms": set(a["kommission_norms"]) | set(b["kommission_norms"]),
             "match_hinweise": list(a["match_hinweise"]) + list(b["match_hinweise"]) + ["CLUSTER_ZUSAMMENGEFUEHRT"],
             "is_lager": a["is_lager"] or b["is_lager"],
@@ -2377,26 +2495,30 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
         if a["is_lager"] and b["is_lager"]:
             return True
 
-        a_kommission = normalize_person_name_for_match(choose_best_value(a["kommission_values"]))
-        b_kommission = normalize_person_name_for_match(choose_best_value(b["kommission_values"]))
-        a_kostenstelle = choose_best_value(a["kostenstelle_values"])
-        b_kostenstelle = choose_best_value(b["kostenstelle_values"])
-
         address_match = False
         if a["address_keys"] and b["address_keys"]:
             for ka in a["address_keys"]:
                 for kb in b["address_keys"]:
-                    if ka == kb or text_similarity(ka, kb) >= 0.93:
+                    if ka == kb or text_similarity(ka, kb) >= 0.96:
                         address_match = True
                         break
                 if address_match:
                     break
 
+        if not address_match:
+            return False
+
+        a_kostenstelle = choose_best_value(a["kostenstelle_values"])
+        b_kostenstelle = choose_best_value(b["kostenstelle_values"])
+
         strong_kostenstelle_match = False
         if a_kostenstelle and b_kostenstelle:
             if (not is_generic_kostenstelle(a_kostenstelle)) and (not is_generic_kostenstelle(b_kostenstelle)):
-                if normalize_code(a_kostenstelle) == normalize_code(b_kostenstelle):
+                if kostenstelle_match(a_kostenstelle, b_kostenstelle):
                     strong_kostenstelle_match = True
+
+        a_kommission = normalize_person_name_for_match(choose_best_value(a["kommission_values"]))
+        b_kommission = normalize_person_name_for_match(choose_best_value(b["kommission_values"]))
 
         person_match = False
         if a_kommission and b_kommission:
@@ -2404,10 +2526,13 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
                 if strict_person_match(a_kommission, b_kommission):
                     person_match = True
 
-        if address_match and (strong_kostenstelle_match or person_match):
+        if strong_kostenstelle_match:
             return True
 
-        if address_match:
+        if person_match:
+            return True
+
+        if not a_kostenstelle and not b_kostenstelle and not a_kommission and not b_kommission:
             return True
 
         return False
@@ -2417,21 +2542,21 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
         kommission = choose_best_value(cluster["kommission_values"])
         baustelle = choose_best_value(cluster["baustelle_values"])
 
-        confidence = 0.55
+        confidence = 0.45
 
         if cluster["is_lager"]:
-            confidence = 0.80
+            confidence = 0.78
         else:
             if cluster["address_keys"]:
-                confidence += 0.20
+                confidence += 0.28
             if kostenstelle and not is_generic_kostenstelle(kostenstelle):
-                confidence += 0.10
+                confidence += 0.12
             if kommission and is_full_person_name(kommission):
-                confidence += 0.08
+                confidence += 0.05
             if cluster["anzahl_dokumente"] >= 2:
-                confidence += 0.07
+                confidence += 0.08
             if "CLUSTER_ZUSAMMENGEFUEHRT" in cluster["match_hinweise"]:
-                confidence += 0.03
+                confidence += 0.02
 
         confidence = min(round(confidence, 2), 0.98)
 
@@ -2451,7 +2576,7 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
             projekt_name_report = baustelle
         elif kostenstelle and not is_generic_kostenstelle(kostenstelle):
             projekt_name_report = kostenstelle
-        elif kommission:
+        elif kommission and is_full_person_name(kommission):
             projekt_name_report = kommission
 
         return {
@@ -2499,7 +2624,7 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
                 add_item_to_cluster(lager_cluster, item, "LAGER_DIREKT")
             continue
 
-        if feat["address_key"]:
+        if get_effective_address_key(feat):
             matched = False
             for cluster in address_clusters:
                 if strong_address_match(feat, cluster):
