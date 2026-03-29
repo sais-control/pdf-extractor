@@ -2604,6 +2604,27 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
 
         return ""
 
+    def can_merge_orphan_clusters_by_kostenstelle(a, b):
+        a_keys = {
+            normalize_kostenstelle_match(x)
+            for x in a.get("kostenstelle_values", [])
+            if x and not is_generic_kostenstelle(x)
+        }
+
+        b_keys = {
+            normalize_kostenstelle_match(x)
+            for x in b.get("kostenstelle_values", [])
+            if x and not is_generic_kostenstelle(x)
+        }
+
+        a_keys.discard("")
+        b_keys.discard("")
+
+        if not a_keys or not b_keys:
+            return False
+
+        return not a_keys.isdisjoint(b_keys)
+    
     def can_merge_orphan_clusters_by_name(a, b):
         a_names = [
             x for x in a.get("kommission_values", [])
@@ -2659,33 +2680,6 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
             return f"NAME::{person_norm}"
 
         return "REST"
-
-
-    def can_merge_orphan_clusters_by_name(a, b):
-        a_names = [
-            x for x in a.get("kommission_values", [])
-            if x and is_full_person_name(x) and not is_noise_kommission(x)
-        ]
-        b_names = [
-            x for x in b.get("kommission_values", [])
-            if x and is_full_person_name(x) and not is_noise_kommission(x)
-        ]
-
-        for av in a_names:
-            for bv in b_names:
-                if strict_person_match(av, bv):
-                    return True
-
-        for an in a.get("kommission_norms", set()):
-            if not an:
-                continue
-            for bn in b.get("kommission_norms", set()):
-                if not bn:
-                    continue
-                if strict_person_match(an, bn):
-                    return True
-
-        return False
 
     def merge_two_clusters(a, b):
         merged = {
@@ -2772,7 +2766,7 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
 
         return False
 
-   def build_cluster_result(cluster, idx):
+    def build_cluster_result(cluster, idx):
         kostenstelle = choose_best_value(cluster["kostenstelle_values"])
         kommission = choose_best_value(cluster["kommission_values"])
         baustelle = choose_best_value(cluster["baustelle_values"])
