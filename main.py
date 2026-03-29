@@ -2236,7 +2236,7 @@ def has_plausible_street_number(address_key):
 
     return True
 
- def addresses_refer_to_same_place(a, b):
+def addresses_refer_to_same_place(a, b):
     a = str(a or "").strip()
     b = str(b or "").strip()
 
