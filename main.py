@@ -1680,12 +1680,30 @@ def normalize_person_name_for_match(value):
     if not s:
         return ""
 
+    s = s.replace(",", " ")
+    s = re.sub(r"\s+", " ", s).strip()
+
     blacklist = {
-        "lager", "webshop", "elements", "abholung", "lieferung",
-        "innend", "aussend", "außend", "kunde", "projekt", "baustelle"
+        "lager", "webshop", "elements", "abholung", "abholer", "lieferung",
+        "innend", "aussend", "außend", "kunde", "projekt", "baustelle",
+        "van", "de", "meent"
     }
 
-    parts = [p for p in s.split() if p and p not in blacklist and not re.search(r"\d", p)]
+    nickname_map = {
+        "alex": "alexander",
+    }
+
+    parts = []
+    for p in s.split():
+        if not p:
+            continue
+        if re.search(r"\d", p):
+            continue
+        if p in blacklist:
+            continue
+        p = nickname_map.get(p, p)
+        parts.append(p)
+
     if not parts:
         return ""
 
@@ -1701,6 +1719,17 @@ def is_full_person_name(value):
         return False
 
     if any(re.search(r"\d", p) for p in parts):
+        return False
+
+    if any(len(p) < 2 for p in parts):
+        return False
+
+    blacklist = {
+        "ks", "kb", "whg", "haus", "objekt", "projekt", "baustelle",
+        "lager", "kunde", "webshop", "elements", "abholung"
+    }
+
+    if any(p in blacklist for p in parts):
         return False
 
     return True
@@ -2474,47 +2503,88 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
         return False
 
     def strict_person_match(a, b):
+        a = normalize_person_name_for_match(a)
+        b = normalize_person_name_for_match(b)
+
         if not a or not b:
             return False
+
+        a_parts = [x for x in a.split() if x]
+        b_parts = [x for x in b.split() if x]
+
+        if len(a_parts) < 2 or len(b_parts) < 2:
+            return False
+
         if a == b:
             return True
 
-        sim = text_similarity(a, b)
-        return sim >= 0.94
+        a_first = a_parts[0]
+        b_first = b_parts[0]
+        a_last = a_parts[-1]
+        b_last = b_parts[-1]
 
-    def can_attach_orphan_to_cluster(item, cluster):
+        if a_last == b_last:
+            if a_first == b_first:
+                return True
+            if a_first.startswith(b_first) or b_first.startswith(a_first):
+                return True
+            if SequenceMatcher(None, a_first, b_first).ratio() >= 0.80:
+                return True
+
+        sim = SequenceMatcher(None, a, b).ratio()
+        return sim >= 0.90
+
+    def can_attach_orphan_to_cluster_by_kostenstelle(item, cluster):
         feat = item["feat"]
 
-        # 1) Kostenstelle hat Vorrang
-        kostenstelle_raw = str(feat.get("kostenstelle_raw") or "").strip()
-        if kostenstelle_raw and not feat.get("kostenstelle_generisch"):
-            for existing_value in cluster.get("kostenstelle_values", []):
-                if not str(existing_value or "").strip():
-                    continue
-                if is_generic_kostenstelle(existing_value):
-                    continue
-                if kostenstelle_match(kostenstelle_raw, existing_value):
-                    return "KOSTENSTELLE_NACHGEZOGEN"
+        if not feat["kostenstelle_raw"]:
+            return ""
 
-        # 2) Nur wenn Kostenstelle nichts gefunden hat:
-        # Name nur mit mindestens Vor- und Nachname
-        kommission_raw = str(feat.get("kommission_raw") or "").strip()
-        kommission_norm = str(feat.get("kommission_norm") or "").strip()
+        if feat["kostenstelle_generisch"]:
+            return ""
 
-        if (
-            kommission_norm
-            and not is_noise_kommission(kommission_raw)
-            and is_full_person_name(kommission_raw)
-        ):
-            for existing_norm in cluster.get("kommission_norms", set()):
-                existing_norm = str(existing_norm or "").strip()
-                if not existing_norm:
-                    continue
-                if strict_person_match(kommission_norm, existing_norm):
-                    return "KOMMISSION_NACHGEZOGEN"
+        for existing_value in cluster.get("kostenstelle_values", []):
+            if not existing_value:
+                continue
+            if is_generic_kostenstelle(existing_value):
+                continue
+            if kostenstelle_match(feat["kostenstelle_raw"], existing_value):
+                return "KOSTENSTELLE_NACHGEZOGEN"
 
-        # 3) Sonst kein Treffer -> später eigenes Cluster
+        for existing_key in cluster.get("kostenstelle_match_keys", set()):
+            if not existing_key:
+                continue
+            if kostenstelle_match(feat["kostenstelle_raw"], existing_key):
+                return "KOSTENSTELLE_NACHGEZOGEN"
+
         return ""
+
+    def can_attach_orphan_to_cluster_by_name(item, cluster):
+        feat = item["feat"]
+
+        if not feat["kommission_norm"]:
+            return ""
+
+        if is_noise_kommission(feat["kommission_raw"]):
+            return ""
+
+        if not is_full_person_name(feat["kommission_raw"]):
+            return ""
+
+        for existing_value in cluster.get("kommission_values", []):
+            if not existing_value:
+                continue
+            if strict_person_match(feat["kommission_raw"], existing_value):
+                return "KOMMISSION_NACHGEZOGEN"
+
+        for existing_norm in cluster.get("kommission_norms", set()):
+            if not existing_norm:
+                continue
+            if strict_person_match(feat["kommission_norm"], existing_norm):
+                return "KOMMISSION_NACHGEZOGEN"
+
+        return ""
+
 
     def merge_two_clusters(a, b):
         merged = {
@@ -2692,15 +2762,21 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
         else:
             orphan_items.append(item)
 
-    standalone_clusters = []
+    pruef_clusters_basis = list(address_clusters)
+    if lager_cluster is not None:
+        pruef_clusters_basis.append(lager_cluster)
+
+    # --------------------------------------------------------
+    # PASS 1: Nachziehen über Kostenstelle
+    # Nur an bereits vorhandene Adress-/Lager-Cluster
+    # --------------------------------------------------------
+    remaining_after_kostenstelle = []
 
     for item in orphan_items:
         candidates = []
 
-        pruef_clusters = list(address_clusters) + list(standalone_clusters)
-
-        for cluster in pruef_clusters:
-            reason = can_attach_orphan_to_cluster(item, cluster)
+        for cluster in pruef_clusters_basis:
+            reason = can_attach_orphan_to_cluster_by_kostenstelle(item, cluster)
             if reason:
                 candidates.append((cluster, reason))
 
@@ -2708,7 +2784,34 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
             cluster, reason = candidates[0]
             add_item_to_cluster(cluster, item, reason)
         else:
-            standalone_clusters.append(make_cluster_from_item(item, "EINZELFALL"))
+            remaining_after_kostenstelle.append(item)
+
+    # --------------------------------------------------------
+    # PASS 2: Nachziehen über vollständigen Namen
+    # Erst nachdem Kostenstelle durch ist
+    # --------------------------------------------------------
+    remaining_after_name = []
+
+    for item in remaining_after_kostenstelle:
+        candidates = []
+
+        for cluster in pruef_clusters_basis:
+            reason = can_attach_orphan_to_cluster_by_name(item, cluster)
+            if reason:
+                candidates.append((cluster, reason))
+
+        if len(candidates) == 1:
+            cluster, reason = candidates[0]
+            add_item_to_cluster(cluster, item, reason)
+        else:
+            remaining_after_name.append(item)
+
+    # --------------------------------------------------------
+    # PASS 3: Rest bleibt Einzelfall
+    # --------------------------------------------------------
+    standalone_clusters = []
+    for item in remaining_after_name:
+        standalone_clusters.append(make_cluster_from_item(item, "EINZELFALL"))
 
     all_clusters = list(address_clusters)
     if lager_cluster is not None:
