@@ -2655,7 +2655,9 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
     for item in orphan_items:
         candidates = []
 
-        for cluster in address_clusters:
+        pruef_clusters = list(address_clusters) + list(standalone_clusters)
+
+        for cluster in pruef_clusters:
             reason = can_attach_orphan_to_cluster(item, cluster)
             if reason:
                 candidates.append((cluster, reason))
