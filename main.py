@@ -2179,8 +2179,6 @@ def extract_project_features(r, betriebsadresse_key=""):
         and addresses_refer_to_same_place(current_address_key, betriebsadresse_key)
     )
 
-    effective_address_key = "" if is_betriebsadresse else current_address_key
-
     return {
         "kostenstelle_raw": kostenstelle_raw,
         "kommission_raw": kommission_raw,
@@ -2191,7 +2189,8 @@ def extract_project_features(r, betriebsadresse_key=""):
         "baustelle_norm": normalize_address(baustelle_raw),
         "address_key": current_address_key,
         "is_betriebsadresse": is_betriebsadresse,
-        "effective_address_key": effective_address_key,
+        "effective_address_key": "" if is_betriebsadresse else current_address_key,
+        "betriebsadresse_key": current_address_key if is_betriebsadresse else "",
         "projekt_text_norm": normalize_name(projekt_text_raw),
         "kostenstelle_generisch": is_generic_kostenstelle(kostenstelle_raw),
     }
@@ -2385,6 +2384,14 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
             return ""
         return key
 
+    def get_betriebsadresse_cluster_key(feat):
+        key = str(feat.get("betriebsadresse_key") or "").strip()
+        if not key:
+            return ""
+        if not has_plausible_street_number(key):
+            return ""
+        return key
+
     def make_cluster_from_item(item, reason):
         feat = item["feat"]
         rechnung = item["rechnung"]
@@ -2392,6 +2399,7 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
 
         kategorie = get_lieferant_kategorie(rechnung, lieferanten_kontext_map)
         effective_address_key = get_effective_address_key(feat)
+        betriebsadresse_cluster_key = get_betriebsadresse_cluster_key(feat)
         kostenstelle_match_key = normalize_kostenstelle_match(feat["kostenstelle_raw"])
 
         material = brutto if (is_rechnung(rechnung) and kategorie == "material") else 0.0
@@ -2404,14 +2412,16 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
             "rechnungsnummern": [get_rechnungsnummer(rechnung)] if get_rechnungsnummer(rechnung) else [],
             "kostenstelle_values": [feat["kostenstelle_raw"]] if feat["kostenstelle_raw"] else [],
             "kommission_values": [feat["kommission_raw"]] if feat["kommission_raw"] and not is_noise_kommission(feat["kommission_raw"]) else [],
-            "baustelle_values": [feat["baustelle_raw"]] if effective_address_key else [],
+            "baustelle_values": [feat["baustelle_raw"]] if feat["baustelle_raw"] else [],
             "projekt_text_values": [feat["projekt_text_raw"]] if feat["projekt_text_raw"] else [],
             "address_keys": {effective_address_key} if effective_address_key else set(),
+            "betriebsadresse_keys": {betriebsadresse_cluster_key} if betriebsadresse_cluster_key else set(),
             "kostenstelle_norms": {feat["kostenstelle_norm"]} if feat["kostenstelle_norm"] else set(),
             "kostenstelle_match_keys": {kostenstelle_match_key} if kostenstelle_match_key else set(),
             "kommission_norms": {feat["kommission_norm"]} if feat["kommission_norm"] and not is_noise_kommission(feat["kommission_raw"]) else set(),
             "match_hinweise": [reason],
             "is_lager": is_lager_item(feat),
+            "is_betriebsadresse_cluster": bool(betriebsadresse_cluster_key and not effective_address_key),
             "rechnung_summe_brutto": round(brutto if is_rechnung(rechnung) else 0.0, 2),
             "gutschrift_summe_brutto": round(brutto if is_gutschrift(rechnung) else 0.0, 2),
             "nettoeffekt_brutto": round(brutto, 2),
@@ -2430,6 +2440,7 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
 
         kategorie = get_lieferant_kategorie(rechnung, lieferanten_kontext_map)
         effective_address_key = get_effective_address_key(feat)
+        betriebsadresse_cluster_key = get_betriebsadresse_cluster_key(feat)
         kostenstelle_match_key = normalize_kostenstelle_match(feat["kostenstelle_raw"])
 
         rid = get_rechnung_id(rechnung)
@@ -2448,7 +2459,7 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
         if feat["kommission_raw"] and not is_noise_kommission(feat["kommission_raw"]):
             cluster["kommission_values"].append(feat["kommission_raw"])
 
-        if feat["baustelle_raw"] and effective_address_key:
+        if feat["baustelle_raw"]:
             cluster["baustelle_values"].append(feat["baustelle_raw"])
 
         if feat["projekt_text_raw"]:
@@ -2456,6 +2467,9 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
 
         if effective_address_key:
             cluster["address_keys"].add(effective_address_key)
+
+        if betriebsadresse_cluster_key:
+            cluster["betriebsadresse_keys"].add(betriebsadresse_cluster_key)
 
         if feat["kostenstelle_norm"]:
             cluster["kostenstelle_norms"].add(feat["kostenstelle_norm"])
@@ -2485,6 +2499,11 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
 
         cluster["nettoeffekt_brutto"] = round(cluster["nettoeffekt_brutto"] + brutto, 2)
         cluster["anzahl_dokumente"] += 1
+
+        if cluster.get("betriebsadresse_keys"):
+            cluster["is_betriebsadresse_cluster"] = True
+        if cluster.get("address_keys"):
+            cluster["is_betriebsadresse_cluster"] = False
 
     def strong_address_match(feat, cluster):
         feat_key = get_effective_address_key(feat)
@@ -2585,7 +2604,6 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
 
         return ""
 
-
     def can_merge_orphan_clusters_by_kostenstelle(a, b):
         a_kostenstelle_values = [
             x for x in a.get("kostenstelle_values", [])
@@ -2611,7 +2629,6 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
                     return True
 
         return False
-
 
     def can_merge_orphan_clusters_by_name(a, b):
         a_names = [
@@ -2649,11 +2666,13 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
             "baustelle_values": list(a["baustelle_values"]) + list(b["baustelle_values"]),
             "projekt_text_values": list(a["projekt_text_values"]) + list(b["projekt_text_values"]),
             "address_keys": set(a["address_keys"]) | set(b["address_keys"]),
+            "betriebsadresse_keys": set(a.get("betriebsadresse_keys", set())) | set(b.get("betriebsadresse_keys", set())),
             "kostenstelle_norms": set(a["kostenstelle_norms"]) | set(b["kostenstelle_norms"]),
             "kostenstelle_match_keys": set(a.get("kostenstelle_match_keys", set())) | set(b.get("kostenstelle_match_keys", set())),
             "kommission_norms": set(a["kommission_norms"]) | set(b["kommission_norms"]),
             "match_hinweise": list(a["match_hinweise"]) + list(b["match_hinweise"]) + ["CLUSTER_ZUSAMMENGEFUEHRT"],
             "is_lager": a["is_lager"] or b["is_lager"],
+            "is_betriebsadresse_cluster": a.get("is_betriebsadresse_cluster", False) or b.get("is_betriebsadresse_cluster", False),
             "rechnung_summe_brutto": round(a["rechnung_summe_brutto"] + b["rechnung_summe_brutto"], 2),
             "gutschrift_summe_brutto": round(a["gutschrift_summe_brutto"] + b["gutschrift_summe_brutto"], 2),
             "nettoeffekt_brutto": round(a["nettoeffekt_brutto"] + b["nettoeffekt_brutto"], 2),
@@ -2664,6 +2683,10 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
             "anzahl_gutschriften": a["anzahl_gutschriften"] + b["anzahl_gutschriften"],
             "anzahl_dokumente": a["anzahl_dokumente"] + b["anzahl_dokumente"],
         }
+
+        if merged["address_keys"]:
+            merged["is_betriebsadresse_cluster"] = False
+
         return merged
 
     def should_merge_clusters(a, b):
@@ -2672,6 +2695,9 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
 
         if a["is_lager"] and b["is_lager"]:
             return True
+
+        if a.get("is_betriebsadresse_cluster") or b.get("is_betriebsadresse_cluster"):
+            return False
 
         address_match = False
         if a["address_keys"] and b["address_keys"]:
@@ -2727,6 +2753,9 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
         else:
             if cluster["address_keys"]:
                 confidence += 0.28
+            elif cluster.get("is_betriebsadresse_cluster") and baustelle:
+                confidence += 0.10
+
             if kostenstelle and not is_generic_kostenstelle(kostenstelle):
                 confidence += 0.12
             if kommission and is_full_person_name(kommission):
@@ -2790,6 +2819,7 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
 
     address_clusters = []
     orphan_items = []
+    betriebsadresse_items = []
     lager_cluster = None
 
     for item in prepared:
@@ -2812,17 +2842,18 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
 
             if not matched:
                 address_clusters.append(make_cluster_from_item(item, "ADRESSE_GLEICH"))
-        else:
-            orphan_items.append(item)
+            continue
+
+        if get_betriebsadresse_cluster_key(feat):
+            betriebsadresse_items.append(item)
+            continue
+
+        orphan_items.append(item)
 
     pruef_clusters_basis = list(address_clusters)
     if lager_cluster is not None:
         pruef_clusters_basis.append(lager_cluster)
 
-    # --------------------------------------------------------
-    # PASS 1: Nachziehen über Kostenstelle
-    # Nur an bereits vorhandene Adress-/Lager-Cluster
-    # --------------------------------------------------------
     remaining_after_kostenstelle = []
 
     for item in orphan_items:
@@ -2839,10 +2870,6 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
         else:
             remaining_after_kostenstelle.append(item)
 
-    # --------------------------------------------------------
-    # PASS 2: Nachziehen über vollständigen Namen
-    # Erst nachdem Kostenstelle durch ist
-    # --------------------------------------------------------
     remaining_after_name = []
 
     for item in remaining_after_kostenstelle:
@@ -2859,17 +2886,10 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
         else:
             remaining_after_name.append(item)
 
-    # --------------------------------------------------------
-    # PASS 3: Rest zunächst als Einzelfall-Cluster anlegen
-    # --------------------------------------------------------
     standalone_clusters = []
     for item in remaining_after_name:
         standalone_clusters.append(make_cluster_from_item(item, "EINZELFALL"))
 
-    # --------------------------------------------------------
-    # PASS 3A: Orphan-Cluster untereinander über Kostenstelle zusammenführen
-    # Nur orphanische Standalone-Cluster, niemals Adress- oder Lager-Cluster
-    # --------------------------------------------------------
     changed_orphan = True
     while changed_orphan:
         changed_orphan = False
@@ -2898,10 +2918,6 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
 
         standalone_clusters = merged
 
-    # --------------------------------------------------------
-    # PASS 3B: Danach orphanische Standalone-Cluster über vollen Namen zusammenführen
-    # Ebenfalls nur orphanische Cluster, niemals Lager
-    # --------------------------------------------------------
     changed_orphan = True
     while changed_orphan:
         changed_orphan = False
@@ -2930,11 +2946,60 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
 
         standalone_clusters = merged
 
+    remaining_betriebsadresse_after_kostenstelle = []
+
+    for item in betriebsadresse_items:
+        candidates = []
+
+        for cluster in pruef_clusters_basis:
+            reason = can_attach_orphan_to_cluster_by_kostenstelle(item, cluster)
+            if reason:
+                candidates.append((cluster, "BETRIEBSADRESSE_" + reason))
+
+        if len(candidates) == 1:
+            cluster, reason = candidates[0]
+            add_item_to_cluster(cluster, item, reason)
+        else:
+            remaining_betriebsadresse_after_kostenstelle.append(item)
+
+    remaining_betriebsadresse_after_name = []
+
+    for item in remaining_betriebsadresse_after_kostenstelle:
+        candidates = []
+
+        for cluster in pruef_clusters_basis:
+            reason = can_attach_orphan_to_cluster_by_name(item, cluster)
+            if reason:
+                candidates.append((cluster, "BETRIEBSADRESSE_" + reason))
+
+        if len(candidates) == 1:
+            cluster, reason = candidates[0]
+            add_item_to_cluster(cluster, item, reason)
+        else:
+            remaining_betriebsadresse_after_name.append(item)
+
+    betriebsadresse_rest_clusters = []
+
+    for item in remaining_betriebsadresse_after_name:
+        feat = item["feat"]
+        bkey = get_betriebsadresse_cluster_key(feat)
+
+        matched = False
+        if bkey:
+            for cluster in betriebsadresse_rest_clusters:
+                if bkey in cluster.get("betriebsadresse_keys", set()):
+                    add_item_to_cluster(cluster, item, "BETRIEBSADRESSE_REST")
+                    matched = True
+                    break
+
+        if not matched:
+            betriebsadresse_rest_clusters.append(make_cluster_from_item(item, "BETRIEBSADRESSE_REST"))
+
     all_clusters = list(address_clusters)
     if lager_cluster is not None:
         all_clusters.append(lager_cluster)
     all_clusters.extend(standalone_clusters)
-
+    all_clusters.extend(betriebsadresse_rest_clusters)
 
     changed = True
     while changed:
@@ -3444,7 +3509,7 @@ def analyze():
                 "zeitraum_start": str(zeitraum_start) if zeitraum_start else str(zeitraum.get("start") or ""),
                 "zeitraum_ende": str(zeitraum_ende) if zeitraum_ende else str(zeitraum.get("ende") or ""),
                 "generated_at": datetime.utcnow().isoformat() + "Z",
-                "analyze_version": "v4-orphan-test-3"
+                "analyze_version": "v4-betriebsadresse-routing-1"
             },
 
             "summary": summary,
