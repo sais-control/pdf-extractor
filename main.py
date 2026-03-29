@@ -2176,7 +2176,7 @@ def extract_project_features(r, betriebsadresse_key=""):
     is_betriebsadresse = bool(
         betriebsadresse_key
         and current_address_key
-        and addresses_refer_to_same_place(current_address_key, betriebsadresse_key)
+        and is_same_betriebsadresse(current_address_key, betriebsadresse_key)
     )
 
     return {
@@ -2289,8 +2289,35 @@ def addresses_refer_to_same_place(a, b):
         return False
 
     sim = text_similarity(a_left, b_left)
-    return sim >= 0.90
-       
+    return sim >= 0.88
+
+def is_same_betriebsadresse(a, b):
+    a = str(a or "").strip()
+    b = str(b or "").strip()
+
+    if not a or not b:
+        return False
+
+    a_left, _, a_plz = a.partition("|")
+    b_left, _, b_plz = b.partition("|")
+
+    a_left = a_left.strip()
+    b_left = b_left.strip()
+    a_plz = a_plz.strip()
+    b_plz = b_plz.strip()
+
+    if a_plz and b_plz and a_plz != b_plz:
+        return False
+
+    a_num = re.search(r"\b(\d+[a-z]?)\b", a_left)
+    b_num = re.search(r"\b(\d+[a-z]?)\b", b_left)
+
+    if a_num and b_num and a_num.group(1) != b_num.group(1):
+        return False
+
+    sim = text_similarity(a_left, b_left)
+
+    return sim >= 0.96
 
 def normalize_kostenstelle_match(value):
     raw = str(value or "").strip().upper()
@@ -2465,9 +2492,11 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
         if feat["projekt_text_raw"]:
             cluster["projekt_text_values"].append(feat["projekt_text_raw"])
 
-        if effective_address_key:
+        # 👉 Nur echte Baustellen-Adressen ins Cluster
+        if effective_address_key and not feat.get("is_betriebsadresse"):
             cluster["address_keys"].add(effective_address_key)
 
+        # 👉 Betriebsadresse separat markieren
         if betriebsadresse_cluster_key:
             cluster["betriebsadresse_keys"].add(betriebsadresse_cluster_key)
 
@@ -2511,12 +2540,8 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
         if not feat_key or not cluster["address_keys"]:
             return False
 
-        if feat_key in cluster["address_keys"]:
-            return True
-
         for existing_key in cluster["address_keys"]:
-            sim = text_similarity(feat_key, existing_key)
-            if sim >= 0.93:
+            if addresses_refer_to_same_place(feat_key, existing_key):
                 return True
 
         return False
@@ -2728,7 +2753,7 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
         if a["address_keys"] and b["address_keys"]:
             for ka in a["address_keys"]:
                 for kb in b["address_keys"]:
-                    if ka == kb or text_similarity(ka, kb) >= 0.96:
+                    if addresses_refer_to_same_place(ka, kb):
                         address_match = True
                         break
                 if address_match:
