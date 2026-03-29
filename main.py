@@ -2142,6 +2142,16 @@ def extract_project_features(r, betriebsadresse_key=""):
     baustelle_raw = str(baustelle or "").strip()
     projekt_text_raw = str(projekt_text or "").strip()
 
+    current_address_key = normalize_address_key(baustelle_raw)
+
+    is_betriebsadresse = bool(
+        betriebsadresse_key
+        and current_address_key
+        and addresses_refer_to_same_place(current_address_key, betriebsadresse_key)
+    )
+
+    effective_address_key = "" if is_betriebsadresse else current_address_key
+
     return {
         "kostenstelle_raw": kostenstelle_raw,
         "kommission_raw": kommission_raw,
@@ -2150,19 +2160,9 @@ def extract_project_features(r, betriebsadresse_key=""):
         "kostenstelle_norm": normalize_code(kostenstelle_raw),
         "kommission_norm": normalize_person_name_for_match(kommission_raw),
         "baustelle_norm": normalize_address(baustelle_raw),
-        "address_key": normalize_address_key(baustelle_raw),
-        "is_betriebsadresse": bool(
-            betriebsadresse_key
-            and normalize_address_key(baustelle_raw) == betriebsadresse_key
-        ),
-        "effective_address_key": (
-            ""
-            if (
-                betriebsadresse_key
-                and normalize_address_key(baustelle_raw) == betriebsadresse_key
-            )
-            else normalize_address_key(baustelle_raw)
-        ),
+        "address_key": current_address_key,
+        "is_betriebsadresse": is_betriebsadresse,
+        "effective_address_key": effective_address_key,
         "projekt_text_norm": normalize_name(projekt_text_raw),
         "kostenstelle_generisch": is_generic_kostenstelle(kostenstelle_raw),
     }
@@ -2236,6 +2236,33 @@ def has_plausible_street_number(address_key):
 
     return True
 
+ def addresses_refer_to_same_place(a, b):
+    a = str(a or "").strip()
+    b = str(b or "").strip()
+
+    if not a or not b:
+        return False
+
+    a_left, _, a_plz = a.partition("|")
+    b_left, _, b_plz = b.partition("|")
+
+    a_left = a_left.strip()
+    b_left = b_left.strip()
+    a_plz = a_plz.strip()
+    b_plz = b_plz.strip()
+
+    if a_plz and b_plz and a_plz != b_plz:
+        return False
+
+    a_num = re.search(r"\b(\d+[a-z]?)\b", a_left)
+    b_num = re.search(r"\b(\d+[a-z]?)\b", b_left)
+
+    if a_num and b_num and a_num.group(1) != b_num.group(1):
+        return False
+
+    sim = text_similarity(a_left, b_left)
+    return sim >= 0.90
+       
 
 def normalize_kostenstelle_match(value):
     raw = str(value or "").strip().upper()
@@ -3181,7 +3208,7 @@ def analyze():
                 "zeitraum_start": str(zeitraum_start) if zeitraum_start else str(zeitraum.get("start") or ""),
                 "zeitraum_ende": str(zeitraum_ende) if zeitraum_ende else str(zeitraum.get("ende") or ""),
                 "generated_at": datetime.utcnow().isoformat() + "Z",
-                "analyze_version": "v4-orphan-test-1"
+                "analyze_version": "v4-orphan-test-2"
             },
 
             "summary": summary,
