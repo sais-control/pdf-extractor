@@ -2125,7 +2125,7 @@ def determine_hinweis_klasse(h, rechnung_map, betriebskontext=None):
 
     return "TECHNISCH"
 
-def extract_project_features(r):
+def extract_project_features(r, betriebsadresse_key=""):
     kostenstelle = r.get("kostenstelle") or r.get("Kostenstelle") or ""
     kommission = r.get("kommission") or r.get("Kommission") or ""
     baustelle = r.get("baustelle") or r.get("Baustelle") or ""
@@ -2151,6 +2151,18 @@ def extract_project_features(r):
         "kommission_norm": normalize_person_name_for_match(kommission_raw),
         "baustelle_norm": normalize_address(baustelle_raw),
         "address_key": normalize_address_key(baustelle_raw),
+        "is_betriebsadresse": bool(
+            betriebsadresse_key
+            and normalize_address_key(baustelle_raw) == betriebsadresse_key
+        ),
+        "effective_address_key": (
+            ""
+            if (
+                betriebsadresse_key
+                and normalize_address_key(baustelle_raw) == betriebsadresse_key
+            )
+            else normalize_address_key(baustelle_raw)
+        ),
         "projekt_text_norm": normalize_name(projekt_text_raw),
         "kostenstelle_generisch": is_generic_kostenstelle(kostenstelle_raw),
     }
@@ -2267,7 +2279,7 @@ def kostenstelle_match(a, b):
 
     return False
         
-def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_kontext_map=None):
+def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_kontext_map=None, betriebsadresse_key=""):
     historische_rechnungen = historische_rechnungen or []
     lieferanten_kontext_map = lieferanten_kontext_map or {}
 
@@ -2310,7 +2322,7 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
         return False
 
     def get_effective_address_key(feat):
-        key = str(feat.get("address_key") or "").strip()
+        key = str(feat.get("effective_address_key") or "").strip()
         if not key:
             return ""
         if not has_plausible_street_number(key):
@@ -2420,6 +2432,7 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
 
     def strong_address_match(feat, cluster):
         feat_key = get_effective_address_key(feat)
+
         if not feat_key or not cluster["address_keys"]:
             return False
 
@@ -2428,7 +2441,7 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
 
         for existing_key in cluster["address_keys"]:
             sim = text_similarity(feat_key, existing_key)
-            if sim >= 0.96:
+            if sim >= 0.93:
                 return True
 
         return False
@@ -2604,7 +2617,7 @@ def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_
         }
 
     for r in all_docs:
-        feat = extract_project_features(r)
+        feat = extract_project_features(r, betriebsadresse_key=betriebsadresse_key)
         prepared.append({
             "rechnung": r,
             "feat": feat,
@@ -3028,6 +3041,14 @@ def analyze():
         historische_rechnungen = data.get("historische_rechnungen", []) or []
 
         betriebskontext = data.get("betriebskontext", {}) or {}
+        betriebsadresse_raw = (
+            betriebskontext.get("betriebsadresse")
+            or betriebskontext.get("Betriebsadresse")
+            or ""
+        ).strip()
+
+        betriebsadresse_key = normalize_address_key(betriebsadresse_raw)
+
         lieferanten_kontext = data.get("lieferanten_kontext", []) or []
 
         if "kommission_pruefen" not in betriebskontext:
@@ -3118,8 +3139,9 @@ def analyze():
             rechnungen=rechnungen_report,
             historische_rechnungen=[],
             lieferanten_kontext_map=lieferanten_kontext_map,
+            betriebsadresse_key=betriebsadresse_key,
         )
-
+        
         projekt_cluster_report = build_project_report(
             projekt_cluster=projekt_cluster,
             rechnung_lookup=lookup_rechnungen,
