@@ -3943,7 +3943,7 @@ def analyze():
             lieferanten_kontext_map=lieferanten_kontext_map,
         )
 
-        projekt_report_meta = project_report_meta
+        projekt_report_meta = build_project_report_meta(projekt_cluster_report)
         projekt_cluster_diagnostics = build_project_cluster_diagnostics(projekt_cluster)
 
         projekt_cluster_report_top10 = sorted(
@@ -4016,7 +4016,7 @@ def analyze():
             },
             "projekt_cluster": projekt_cluster,
             "projekt_cluster_report": projekt_cluster_report,
-            "projekt_report_meta": project_report_meta,
+            "projekt_report_meta": projekt_report_meta,
             "payment": payment,
             "report_highlights": {
                 "wichtigste_faelle": wichtige_faelle
