@@ -2262,6 +2262,33 @@ def addresses_refer_to_same_place(a, b):
 
     sim = text_similarity(a_left, b_left)
     return sim >= 0.88
+    
+def is_same_betriebsadresse(a, b):
+    a = str(a or "").strip()
+    b = str(b or "").strip()
+
+    if not a or not b:
+        return False
+
+    a_left, _, a_plz = a.partition("|")
+    b_left, _, b_plz = b.partition("|")
+
+    a_left = a_left.strip()
+    b_left = b_left.strip()
+    a_plz = a_plz.strip()
+    b_plz = b_plz.strip()
+
+    if a_plz and b_plz and a_plz != b_plz:
+        return False
+
+    a_num = re.search(r"\b(\d+[a-z]?)\b", a_left)
+    b_num = re.search(r"\b(\d+[a-z]?)\b", b_left)
+
+    if a_num and b_num and a_num.group(1) != b_num.group(1):
+        return False
+
+    sim = text_similarity(a_left, b_left)
+    return sim >= 0.96
 
 def is_plausible_project_kostenstelle(value):
     raw = str(value or "").strip()
