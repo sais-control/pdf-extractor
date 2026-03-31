@@ -3486,6 +3486,8 @@ def build_project_report(projekt_cluster, rechnung_lookup=None, lieferanten_kont
             "erkannte_kostenstellen_alle": unique_nonempty(cluster.get("erkannte_kostenstellen_alle") or []),
             "erkannte_kostenstellen_plausibel": unique_nonempty(cluster.get("erkannte_kostenstellen_plausibel") or []),
             "erkannte_kommission": str(cluster.get("erkannte_kommission") or "").strip(),
+            "is_betriebskosten": bool(cluster.get("is_betriebskosten", False)),
+            "is_offene_projektkosten": bool(cluster.get("is_offene_projektkosten", False)),
 
             "status": str(cluster.get("status") or "").strip(),
             "confidence": to_float_safe(cluster.get("confidence")),
@@ -3974,6 +3976,8 @@ def build_betriebskosten_report(rechnungen_report, lieferanten_kontext_map, betr
         "summe_netto": 0.0,
     })
 
+    rechnungen_details = []
+
     for r in rechnungen_report:
         kategorie = get_lieferant_kategorie(r, lieferanten_kontext_map)
 
@@ -4011,6 +4015,24 @@ def build_betriebskosten_report(rechnungen_report, lieferanten_kontext_map, betr
         if is_gutschrift(r):
             lf_item["anzahl_gutschriften"] += 1
 
+        rechnungen_details.append({
+            "rechnung_id": get_rechnung_id(r),
+            "rechnungsnummer": get_rechnungsnummer(r),
+            "dokumenttyp": get_dokumenttyp(r),
+            "lieferant_id": lieferant_id,
+            "lieferant_name": lieferant_name,
+            "kosten_kategorie": kategorie,
+            "zugeordnete_baustelle": betriebsadresse_raw or "",
+            "rechnungsdatum": str(get_rechnungsdatum(r) or ""),
+            "eingangsdatum": str(get_eingangsdatum(r) or ""),
+            "faelligkeitsdatum": str(get_faelligkeitsdatum(r) or ""),
+            "brutto_summe": round(brutto, 2),
+            "netto_summe": round(netto, 2),
+            "pruefung_status": get_pruefung_status(r),
+            "gesamtbewertung": get_gesamtbewertung(r),
+            "ablage_status": get_ablage_status(r),
+        })
+
     kategorien = []
     for _, v in kategorien_map.items():
         kategorien.append({
@@ -4040,16 +4062,22 @@ def build_betriebskosten_report(rechnungen_report, lieferanten_kontext_map, betr
         })
 
     lieferanten.sort(key=lambda x: abs(x["summe_brutto"]), reverse=True)
+    rechnungen_details.sort(key=lambda x: abs(x["brutto_summe"]), reverse=True)
 
     return {
         "betriebsadresse": betriebsadresse_raw or "",
         "kategorien": kategorien,
         "lieferanten_top20": lieferanten[:20],
+        "rechnungen_top50": rechnungen_details[:50],
         "summe_brutto_gesamt": round(sum(x["summe_brutto"] for x in kategorien), 2),
         "summe_netto_gesamt": round(sum(x["summe_netto"] for x in kategorien), 2),
         "anzahl_kategorien": len(kategorien),
         "anzahl_lieferanten": len(lieferanten),
+        "anzahl_rechnungen_gesamt": sum(x["anzahl_rechnungen"] for x in kategorien),
+        "anzahl_gutschriften_gesamt": sum(x["anzahl_gutschriften"] for x in kategorien),
+        "anzahl_dokumente_gesamt": sum(x["anzahl_dokumente"] for x in kategorien),
     }
+
     
 def build_email_summary(summary, fachlicher_breakdown, payment, top_lieferanten, meta_report_type):
     parts = []
@@ -4467,8 +4495,12 @@ def build_compact_analysis_response(
             "summe_netto_gesamt": round2(betriebskosten_report.get("summe_netto_gesamt", 0)),
             "anzahl_kategorien": safe_int(betriebskosten_report.get("anzahl_kategorien", 0)),
             "anzahl_lieferanten": safe_int(betriebskosten_report.get("anzahl_lieferanten", 0)),
+            "anzahl_rechnungen_gesamt": safe_int(betriebskosten_report.get("anzahl_rechnungen_gesamt", 0)),
+            "anzahl_gutschriften_gesamt": safe_int(betriebskosten_report.get("anzahl_gutschriften_gesamt", 0)),
+            "anzahl_dokumente_gesamt": safe_int(betriebskosten_report.get("anzahl_dokumente_gesamt", 0)),
             "kategorien": betriebskosten_report.get("kategorien", [])[:10],
             "lieferanten_top20": betriebskosten_report.get("lieferanten_top20", [])[:20],
+            "rechnungen_top50": betriebskosten_report.get("rechnungen_top50", [])[:50],
         },
 
     }
