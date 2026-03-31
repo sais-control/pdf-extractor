@@ -2263,32 +2263,74 @@ def addresses_refer_to_same_place(a, b):
     sim = text_similarity(a_left, b_left)
     return sim >= 0.88
 
-def is_same_betriebsadresse(a, b):
-    a = str(a or "").strip()
-    b = str(b or "").strip()
-
-    if not a or not b:
+def is_plausible_project_kostenstelle(value):
+    raw = str(value or "").strip()
+    if not raw:
         return False
 
-    a_left, _, a_plz = a.partition("|")
-    b_left, _, b_plz = b.partition("|")
-
-    a_left = a_left.strip()
-    b_left = b_left.strip()
-    a_plz = a_plz.strip()
-    b_plz = b_plz.strip()
-
-    if a_plz and b_plz and a_plz != b_plz:
+    if is_generic_kostenstelle(raw):
         return False
 
-    a_num = re.search(r"\b(\d+[a-z]?)\b", a_left)
-    b_num = re.search(r"\b(\d+[a-z]?)\b", b_left)
+    cleaned = raw.upper()
+    cleaned = cleaned.replace(" ", "").replace("-", "").replace("_", "").replace("/", "").replace("\\", "")
 
-    if a_num and b_num and a_num.group(1) != b_num.group(1):
+    letters = re.findall(r"[A-ZÄÖÜ]", cleaned)
+    digits = re.sub(r"\D", "", cleaned)
+
+    if letters:
+        return True
+
+    if 1 <= len(digits) <= 8:
+        return True
+
+    return False
+
+
+def is_weak_project_kostenstelle(value):
+    raw = str(value or "").strip()
+    if not raw:
         return False
 
-    sim = text_similarity(a_left, b_left)
-    return sim >= 0.96
+    return not is_plausible_project_kostenstelle(raw)
+
+
+def extract_clean_baustelle_text(value):
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+
+    s = re.sub(r"\s+", " ", raw).strip()
+
+    noise_patterns = [
+        r"\bvom\b.*$",
+        r"\babholung\b.*$",
+        r"\bselbstabholer\b.*$",
+        r"\babholer\b.*$",
+        r"\blieferung\b.*$",
+        r"\bupdate\b.*$",
+        r"\bkommission\b.*$",
+        r"\bkostenstelle\b.*$",
+    ]
+    for p in noise_patterns:
+        s = re.sub(p, "", s, flags=re.IGNORECASE).strip()
+
+    address_patterns = [
+        r"([A-Za-zÄÖÜäöüß0-9\-\./ ]+?\b(?:str\.?|straße|strasse|weg|allee|platz|gasse|ring|ufer|pfad|stieg|trift|lehnhof|weiden)\s+\d+[A-Za-z]?(?:,\s*|\s+)\d{5}\s+[A-Za-zÄÖÜäöüß\-]+(?:\s+[A-Za-zÄÖÜäöüß\-]+)*)",
+    ]
+
+    for pattern in address_patterns:
+        m = re.search(pattern, s, flags=re.IGNORECASE)
+        if m:
+            candidate = re.sub(r"\s+", " ", m.group(1)).strip(" ,.-")
+            key = normalize_address_key(candidate)
+            if has_plausible_street_number(key):
+                return candidate
+
+    key = normalize_address_key(s)
+    if has_plausible_street_number(key):
+        return re.sub(r"\s+", " ", s).strip(" ,.-")
+
+    return ""
 
 def normalize_kostenstelle_match(value):
     raw = str(value or "").strip().upper()
@@ -2345,7 +2387,8 @@ def extract_project_features(r, betriebsadresse_key=""):
 
     kostenstelle_raw = str(kostenstelle or "").strip()
     kommission_raw = str(kommission or "").strip()
-    baustelle_raw = str(baustelle or "").strip()
+    baustelle_raw_original = str(baustelle or "").strip()
+    baustelle_raw = extract_clean_baustelle_text(baustelle_raw_original)
     projekt_text_raw = str(projekt_text or "").strip()
 
     current_address_key = normalize_address_key(baustelle_raw)
@@ -2867,7 +2910,7 @@ def build_project_clusters(rechnungen, lieferanten_kontext_map=None, betriebsadr
 
         strong_kostenstelle_match = False
         if a_kostenstelle and b_kostenstelle:
-            if (not is_generic_kostenstelle(a_kostenstelle)) and (not is_generic_kostenstelle(b_kostenstelle)):
+            if is_plausible_project_kostenstelle(a_kostenstelle) and is_plausible_project_kostenstelle(b_kostenstelle):
                 if kostenstelle_match(a_kostenstelle, b_kostenstelle):
                     strong_kostenstelle_match = True
 
@@ -2886,10 +2929,14 @@ def build_project_clusters(rechnungen, lieferanten_kontext_map=None, betriebsadr
         if person_match:
             return True
 
+        if a["address_keys"] and b["address_keys"]:
+            return True
+
         if not a_kostenstelle and not b_kostenstelle and not a_kommission and not b_kommission:
             return True
 
         return False
+
 
     def build_cluster_result(cluster, idx):
         kostenstelle = choose_best_value(cluster["kostenstelle_values"])
@@ -2950,8 +2997,7 @@ def build_project_clusters(rechnungen, lieferanten_kontext_map=None, betriebsadr
                 confidence += 0.28
             elif cluster.get("is_betriebsadresse_cluster") and baustelle:
                 confidence += 0.10
-
-            if kostenstelle and not is_generic_kostenstelle(kostenstelle):
+            if is_plausible_project_kostenstelle(kostenstelle):
                 confidence += 0.18
             if kommission and is_full_person_name(kommission):
                 confidence += 0.05
@@ -2978,11 +3024,11 @@ def build_project_clusters(rechnungen, lieferanten_kontext_map=None, betriebsadr
         projekt_name_report = ""
         if cluster["is_lager"]:
             projekt_name_report = "Lager / P1"
-        elif baustelle and kostenstelle and not is_generic_kostenstelle(kostenstelle):
+        elif baustelle and is_plausible_project_kostenstelle(kostenstelle):
             projekt_name_report = f"{baustelle} / {kostenstelle}"
         elif baustelle:
             projekt_name_report = baustelle
-        elif kostenstelle and not is_generic_kostenstelle(kostenstelle):
+        elif is_plausible_project_kostenstelle(kostenstelle):
             projekt_name_report = kostenstelle
         elif kommission and is_full_person_name(kommission):
             projekt_name_report = kommission
@@ -2999,6 +3045,11 @@ def build_project_clusters(rechnungen, lieferanten_kontext_map=None, betriebsadr
             "projekt_name_report": projekt_name_report,
             "erkannte_baustelle": baustelle,
             "erkannte_kostenstelle": kostenstelle,
+            "erkannte_kostenstellen_alle": unique_nonempty(cluster.get("kostenstelle_values", [])),
+            "erkannte_kostenstellen_plausibel": [
+                x for x in unique_nonempty(cluster.get("kostenstelle_values", []))
+                if is_plausible_project_kostenstelle(x)
+            ],
             "erkannte_kommission": kommission,
             "projekt_summe_brutto": round(cluster["nettoeffekt_brutto"], 2),
             "projekt_summe_netto": round(cluster["nettoeffekt_netto"], 2),
@@ -3329,7 +3380,10 @@ def build_project_report(projekt_cluster, rechnung_lookup=None, lieferanten_kont
             "projekt_name": projekt_name,
             "erkannte_baustelle": str(cluster.get("erkannte_baustelle") or "").strip(),
             "erkannte_kostenstelle": str(cluster.get("erkannte_kostenstelle") or "").strip(),
+            "erkannte_kostenstellen_alle": unique_nonempty(cluster.get("erkannte_kostenstellen_alle") or []),
+            "erkannte_kostenstellen_plausibel": unique_nonempty(cluster.get("erkannte_kostenstellen_plausibel") or []),
             "erkannte_kommission": str(cluster.get("erkannte_kommission") or "").strip(),
+
             "status": str(cluster.get("status") or "").strip(),
             "confidence": to_float_safe(cluster.get("confidence")),
             "anzahl_rechnungen": int(cluster.get("anzahl_rechnungen") or 0),
@@ -3418,37 +3472,42 @@ def build_payment_section(rechnungen, payment_start, payment_end):
 
     for r in rechnungen:
         fad = get_faelligkeitsdatum(r)
-        if fad and payment_start and payment_end and payment_start <= fad <= payment_end:
-            brutto = get_brutto_summe(r)
-            skonto_betrag = get_skonto_betrag(r)
+        brutto = get_brutto_summe(r)
+        skonto_prozent = get_skonto_prozent(r)
+        skonto_betrag_raw = get_skonto_betrag(r)
 
+        hat_echtes_skonto = False
+        if skonto_prozent > 0:
+            hat_echtes_skonto = True
+        elif skonto_betrag_raw > 0 and brutto > 0 and skonto_betrag_raw < brutto:
+            hat_echtes_skonto = True
+
+        effektiver_skonto_betrag = round(skonto_betrag_raw, 2) if hat_echtes_skonto else 0.0
+
+        if fad and payment_start and payment_end and payment_start <= fad <= payment_end:
             entry = {
                 "rechnung_id": get_rechnung_id(r),
                 "rechnungsnummer": get_rechnungsnummer(r),
                 "lieferant_name": get_lieferant_name(r),
                 "faelligkeitsdatum": str(fad or ""),
                 "brutto_summe": round(brutto, 2),
-                "skonto_betrag": round(skonto_betrag, 2),
-                "skonto_prozent": round(get_skonto_prozent(r), 2),
+                "skonto_betrag": effektiver_skonto_betrag,
+                "skonto_prozent": round(skonto_prozent, 2) if hat_echtes_skonto else 0.0,
+                "hat_skonto": hat_echtes_skonto,
             }
 
             faellige.append(entry)
             summe_faellig += brutto
 
-        skonto_prozent = get_skonto_prozent(r)
-        skonto_betrag = get_skonto_betrag(r)
-
-        if skonto_prozent > 0 and skonto_betrag > 0 and get_brutto_summe(r) > 0 and is_rechnung(r):
-            skonto_fad = get_faelligkeitsdatum(r)
-            if skonto_fad and payment_start and payment_end and payment_start <= skonto_fad <= payment_end:
+            if hat_echtes_skonto and is_rechnung(r):
                 skonto_chancen.append({
                     "rechnung_id": get_rechnung_id(r),
                     "rechnungsnummer": get_rechnungsnummer(r),
                     "lieferant_name": get_lieferant_name(r),
-                    "skonto_prozent": skonto_prozent,
-                    "skonto_betrag": round(skonto_betrag, 2),
-                    "brutto_summe": round(get_brutto_summe(r), 2),
-                    "faelligkeitsdatum": str(skonto_fad or ""),
+                    "skonto_prozent": round(skonto_prozent, 2),
+                    "skonto_betrag": effektiver_skonto_betrag,
+                    "brutto_summe": round(brutto, 2),
+                    "faelligkeitsdatum": str(fad or ""),
                 })
 
     faellige.sort(key=lambda x: x["brutto_summe"], reverse=True)
@@ -3462,6 +3521,7 @@ def build_payment_section(rechnungen, payment_start, payment_end):
         "faellige_rechnungen": faellige[:20],
         "skonto_chancen": skonto_chancen[:20],
     }
+
 
 def build_fachliche_hinweis_details(fachliche_hinweise, rechnung_map):
     details = []
@@ -3645,9 +3705,8 @@ def is_countable_project_cluster(cluster):
     baustelle = str(cluster.get("erkannte_baustelle") or "").strip()
     kommission = str(cluster.get("erkannte_kommission") or "").strip()
 
-    kostenstelle_generisch = is_generic_kostenstelle(kostenstelle)
+    hat_starke_kostenstelle = is_plausible_project_kostenstelle(kostenstelle)
 
-    hat_starke_kostenstelle = bool(kostenstelle and not kostenstelle_generisch)
     hat_baustelle = bool(baustelle)
     hat_vollname = bool(kommission and is_full_person_name(kommission))
 
@@ -3943,6 +4002,8 @@ def strip_project_for_report(p: Dict[str, Any]) -> Dict[str, Any]:
         "confidence": round2(p.get("confidence", 0)),
         "erkannte_baustelle": p.get("erkannte_baustelle", ""),
         "erkannte_kostenstelle": p.get("erkannte_kostenstelle", ""),
+        "erkannte_kostenstellen_alle": unique_nonempty(p.get("erkannte_kostenstellen_alle") or []),
+        "erkannte_kostenstellen_plausibel": unique_nonempty(p.get("erkannte_kostenstellen_plausibel") or []),
         "erkannte_kommission": p.get("erkannte_kommission", ""),
         "anzahl_dokumente": safe_int(p.get("anzahl_dokumente", 0)),
         "anzahl_rechnungen": safe_int(p.get("anzahl_rechnungen", 0)),
