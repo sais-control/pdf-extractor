@@ -2562,6 +2562,42 @@ def build_project_clusters(rechnungen, lieferanten_kontext_map=None, betriebsadr
     all_docs = list(rechnungen)
     prepared = []
 
+    def get_cluster_pf(adjusted_kategorie):
+        kat = str(adjusted_kategorie or "").strip().upper()
+
+        if kat == "GROSSHANDEL":
+            return "GROSSHANDEL"
+
+        if kat in {"HERSTELLER", "SUBUNTERNEHMER"}:
+            return "BAUSTELLE_ONLY"
+
+        return "BETRIEBSKOSTEN"
+
+    def is_offene_projektkosten_kategorie(kategorie):
+        kat = str(kategorie or "").strip().upper()
+        return kat in {"GROSSHANDEL", "HERSTELLER", "SUBUNTERNEHMER"}
+
+    def get_effective_kostenstelle_for_cluster(feat, rechnung):
+        kategorie = get_lieferant_kategorie(rechnung, lieferanten_kontext_map)
+        pfad = get_cluster_pf(kategorie)
+
+        if pfad != "GROSSHANDEL":
+            return ""
+
+        raw = str(feat.get("kostenstelle_raw") or "").strip()
+        if not raw:
+            return ""
+        if feat.get("kostenstelle_generisch"):
+            return ""
+        if not is_plausible_project_kostenstelle(raw):
+            return ""
+
+        return raw
+
+    def is_betriebskosten_kategorie(rechnung):
+        kategorie = get_lieferant_kategorie(rechnung, lieferanten_kontext_map)
+        return get_cluster_pf(kategorie) == "BETRIEBSKOSTEN"
+
     def is_lager_item(feat):
         values = [
             str(feat.get("kostenstelle_raw") or "").strip().lower(),
@@ -2601,7 +2637,9 @@ def build_project_clusters(rechnungen, lieferanten_kontext_map=None, betriebsadr
         kategorie = get_lieferant_kategorie(rechnung, lieferanten_kontext_map)
         effective_address_key = get_effective_address_key(feat)
         betriebsadresse_cluster_key = get_betriebsadresse_cluster_key(feat)
-        kostenstelle_match_key = normalize_kostenstelle_match(feat["kostenstelle_raw"])
+        effective_kostenstelle_raw = get_effective_kostenstelle_for_cluster(feat, rechnung)
+        kostenstelle_match_key = normalize_kostenstelle_match(effective_kostenstelle_raw)
+
 
         material = brutto if (is_rechnung(rechnung) and kategorie in {"GROSSHANDEL", "HERSTELLER"}) else 0.0
         subunternehmer = brutto if (is_rechnung(rechnung) and kategorie == "SUBUNTERNEHMER") else 0.0
@@ -2611,13 +2649,13 @@ def build_project_clusters(rechnungen, lieferanten_kontext_map=None, betriebsadr
             "rechnungen": [rechnung],
             "rechnung_ids": [get_rechnung_id(rechnung)] if get_rechnung_id(rechnung) else [],
             "rechnungsnummern": [get_rechnungsnummer(rechnung)] if get_rechnungsnummer(rechnung) else [],
-            "kostenstelle_values": [feat["kostenstelle_raw"]] if feat["kostenstelle_raw"] else [],
+            "kostenstelle_values": [effective_kostenstelle_raw] if effective_kostenstelle_raw else [],
             "kommission_values": [feat["kommission_raw"]] if feat["kommission_raw"] and not is_noise_kommission(feat["kommission_raw"]) else [],
             "baustelle_values": [feat["baustelle_raw"]] if feat["baustelle_raw"] else [],
             "projekt_text_values": [feat["projekt_text_raw"]] if feat["projekt_text_raw"] else [],
             "address_keys": {effective_address_key} if effective_address_key else set(),
             "betriebsadresse_keys": {betriebsadresse_cluster_key} if betriebsadresse_cluster_key else set(),
-            "kostenstelle_norms": {feat["kostenstelle_norm"]} if feat["kostenstelle_norm"] else set(),
+            "kostenstelle_norms": {normalize_code(effective_kostenstelle_raw)} if effective_kostenstelle_raw else set(),
             "kostenstelle_match_keys": {kostenstelle_match_key} if kostenstelle_match_key else set(),
             "kommission_norms": {feat["kommission_norm"]} if feat["kommission_norm"] and not is_noise_kommission(feat["kommission_raw"]) else set(),
             "match_hinweise": [reason],
@@ -2646,7 +2684,8 @@ def build_project_clusters(rechnungen, lieferanten_kontext_map=None, betriebsadr
         kategorie = get_lieferant_kategorie(rechnung, lieferanten_kontext_map)
         effective_address_key = get_effective_address_key(feat)
         betriebsadresse_cluster_key = get_betriebsadresse_cluster_key(feat)
-        kostenstelle_match_key = normalize_kostenstelle_match(feat["kostenstelle_raw"])
+        effective_kostenstelle_raw = get_effective_kostenstelle_for_cluster(feat, rechnung)
+        kostenstelle_match_key = normalize_kostenstelle_match(effective_kostenstelle_raw)
 
         rid = get_rechnung_id(rechnung)
         rnr = get_rechnungsnummer(rechnung)
@@ -2658,8 +2697,8 @@ def build_project_clusters(rechnungen, lieferanten_kontext_map=None, betriebsadr
 
         cluster["rechnungen"].append(rechnung)
 
-        if feat["kostenstelle_raw"]:
-            cluster["kostenstelle_values"].append(feat["kostenstelle_raw"])
+        if effective_kostenstelle_raw:
+            cluster["kostenstelle_values"].append(effective_kostenstelle_raw)
 
         if feat["kommission_raw"] and not is_noise_kommission(feat["kommission_raw"]):
             cluster["kommission_values"].append(feat["kommission_raw"])
@@ -2676,8 +2715,8 @@ def build_project_clusters(rechnungen, lieferanten_kontext_map=None, betriebsadr
         if betriebsadresse_cluster_key:
             cluster["betriebsadresse_keys"].add(betriebsadresse_cluster_key)
 
-        if feat["kostenstelle_norm"]:
-            cluster["kostenstelle_norms"].add(feat["kostenstelle_norm"])
+        if effective_kostenstelle_raw:
+            cluster["kostenstelle_norms"].add(normalize_code(effective_kostenstelle_raw))
 
         if kostenstelle_match_key:
             cluster["kostenstelle_match_keys"].add(kostenstelle_match_key)
@@ -3049,8 +3088,12 @@ def build_project_clusters(rechnungen, lieferanten_kontext_map=None, betriebsadr
             status = "UNSICHER"
 
         projekt_name_report = ""
-        if cluster["is_lager"]:
-            projekt_name_report = "Lager / P1"
+        if "BETRIEBSKOSTEN" in cluster.get("match_hinweise", []):
+            projekt_name_report = "Betriebskosten"
+        elif "OFFENE_PROJEKTKOSTEN" in cluster.get("match_hinweise", []):
+            projekt_name_report = "Offene Projektkosten"
+        elif cluster["is_lager"]:
+            projekt_name_report = "Lager"
         elif baustelle and is_plausible_project_kostenstelle(kostenstelle):
             projekt_name_report = f"{baustelle} / {kostenstelle}"
         elif baustelle:
@@ -3092,6 +3135,8 @@ def build_project_clusters(rechnungen, lieferanten_kontext_map=None, betriebsadr
             "confidence": confidence,
             "status": status,
             "is_lager": bool(cluster.get("is_lager", False)),
+            "is_betriebskosten": "BETRIEBSKOSTEN" in cluster.get("match_hinweise", []),
+            "is_offene_projektkosten": "OFFENE_PROJEKTKOSTEN" in cluster.get("match_hinweise", []),
             "zugeordnete_rechnung_ids": unique_nonempty(cluster["rechnung_ids"]),
             "zugeordnete_rechnungsnummern": unique_nonempty(cluster["rechnungsnummern"]),
             "match_hinweise": sorted(list(set(cluster["match_hinweise"]))),
@@ -3115,10 +3160,17 @@ def build_project_clusters(rechnungen, lieferanten_kontext_map=None, betriebsadr
     address_clusters = []
     orphan_items = []
     betriebsadresse_items = []
+    offene_projektkosten_items = []
     lager_cluster = None
+
 
     for item in prepared:
         feat = item["feat"]
+        rechnung = item["rechnung"]
+        kategorie = get_lieferant_kategorie(rechnung, lieferanten_kontext_map)
+        pfad = get_cluster_pf(kategorie)
+        effective_kostenstelle_raw = get_effective_kostenstelle_for_cluster(feat, rechnung)
+        effective_address_key = get_effective_address_key(feat)
 
         if is_lager_item(feat):
             if lager_cluster is None:
@@ -3127,50 +3179,70 @@ def build_project_clusters(rechnungen, lieferanten_kontext_map=None, betriebsadr
                 add_item_to_cluster(lager_cluster, item, "LAGER_DIREKT")
             continue
 
-        if feat["kostenstelle_raw"] and not feat["kostenstelle_generisch"]:
-            matched = False
+        if pfad == "GROSSHANDEL":
+            if effective_kostenstelle_raw:
+                matched = False
 
-            for cluster in address_clusters:
-                reason = can_attach_orphan_to_cluster_by_kostenstelle(item, cluster)
-                if reason:
-                    add_item_to_cluster(cluster, item, reason)
-                    matched = True
-                    break
+                for cluster in address_clusters:
+                    reason = can_attach_orphan_to_cluster_by_kostenstelle(item, cluster)
+                    if reason:
+                        add_item_to_cluster(cluster, item, reason)
+                        matched = True
+                        break
 
-            if not matched:
-                address_clusters.append(make_cluster_from_item(item, "KOSTENSTELLE_DIREKT"))
+                if not matched:
+                    address_clusters.append(make_cluster_from_item(item, "KOSTENSTELLE_DIREKT"))
+                continue
+
+            if effective_address_key:
+                matched = False
+
+                for cluster in address_clusters:
+                    reason = can_attach_address_only_to_cluster(item, cluster)
+                    if reason:
+                        add_item_to_cluster(cluster, item, reason)
+                        matched = True
+                        break
+
+                if not matched:
+                    for cluster in address_clusters:
+                        if strong_address_match(feat, cluster):
+                            add_item_to_cluster(cluster, item, "ADRESSE_GLEICH")
+                            matched = True
+                            break
+
+                if not matched:
+                    address_clusters.append(make_cluster_from_item(item, "ADRESSE_NEU"))
+                continue
+
+            offene_projektkosten_items.append(item)
             continue
 
-        if get_effective_address_key(feat):
-            matched = False
+        if pfad == "BAUSTELLE_ONLY":
+            if effective_address_key:
+                matched = False
 
-            for cluster in address_clusters:
-                reason = can_attach_address_only_to_cluster(item, cluster)
-                if reason:
-                    add_item_to_cluster(cluster, item, reason)
-                    matched = True
-                    break
-
-            if not matched:
                 for cluster in address_clusters:
                     if strong_address_match(feat, cluster):
                         add_item_to_cluster(cluster, item, "ADRESSE_GLEICH")
                         matched = True
                         break
 
-            if not matched:
-                address_clusters.append(make_cluster_from_item(item, "ADRESSE_NEU"))
-            continue
+                if not matched:
+                    address_clusters.append(make_cluster_from_item(item, "ADRESSE_NEU"))
+                continue
 
-        if get_betriebsadresse_cluster_key(feat):
-            betriebsadresse_items.append(item)
+            offene_projektkosten_items.append(item)
             continue
 
         orphan_items.append(item)
 
+
     pruef_clusters_basis = list(address_clusters)
     if lager_cluster is not None:
         pruef_clusters_basis.append(lager_cluster)
+        
+    offene_projektkosten_clusters = []
 
     remaining_after_kostenstelle = []
 
@@ -3203,6 +3275,9 @@ def build_project_clusters(rechnungen, lieferanten_kontext_map=None, betriebsadr
             add_item_to_cluster(cluster, item, reason)
         else:
             remaining_after_name.append(item)
+
+    for item in offene_projektkosten_items:
+        offene_projektkosten_clusters.append(make_cluster_from_item(item, "OFFENE_PROJEKTKOSTEN"))
 
     standalone_clusters = []
     for item in remaining_after_name:
@@ -3322,6 +3397,7 @@ def build_project_clusters(rechnungen, lieferanten_kontext_map=None, betriebsadr
     all_clusters = list(address_clusters)
     if lager_cluster is not None:
         all_clusters.append(lager_cluster)
+    all_clusters.extend(offene_projektkosten_clusters)
     all_clusters.extend(standalone_clusters)
     all_clusters.extend(betriebsadresse_rest_clusters)
 
@@ -3724,6 +3800,11 @@ def is_countable_project_cluster(cluster):
 
     if bool(cluster.get("is_lager")):
         return True
+    if bool(cluster.get("is_betriebskosten")):
+        return False
+
+    if bool(cluster.get("is_offene_projektkosten")):
+        return False
 
     anzahl_dokumente = int(cluster.get("anzahl_dokumente") or 0)
     confidence = float(cluster.get("confidence") or 0)
@@ -3870,6 +3951,106 @@ def build_non_project_supplier_summary(rechnungen_report, lieferanten_kontext_ma
     result.sort(key=lambda x: abs(x["summe_brutto"]), reverse=True)
     return result
 
+def build_betriebskosten_report(rechnungen_report, lieferanten_kontext_map, betriebsadresse_raw=""):
+    kategorien_map = defaultdict(lambda: {
+        "kosten_kategorie": "",
+        "zugeordnete_baustelle": betriebsadresse_raw or "",
+        "anzahl_dokumente": 0,
+        "anzahl_rechnungen": 0,
+        "anzahl_gutschriften": 0,
+        "summe_brutto": 0.0,
+        "summe_netto": 0.0,
+        "lieferanten": set(),
+    })
+
+    lieferanten_map = defaultdict(lambda: {
+        "lieferant_name": "",
+        "kosten_kategorie": "",
+        "zugeordnete_baustelle": betriebsadresse_raw or "",
+        "anzahl_dokumente": 0,
+        "anzahl_rechnungen": 0,
+        "anzahl_gutschriften": 0,
+        "summe_brutto": 0.0,
+        "summe_netto": 0.0,
+    })
+
+    for r in rechnungen_report:
+        kategorie = get_lieferant_kategorie(r, lieferanten_kontext_map)
+
+        if kategorie in {"GROSSHANDEL", "HERSTELLER", "SUBUNTERNEHMER"}:
+            continue
+
+        lieferant_name = get_lieferant_name(r)
+        lieferant_id = get_lieferant_id(r)
+        lieferant_key = lieferant_id or lieferant_name or "UNBEKANNT"
+
+        brutto = get_brutto_summe(r)
+        netto = get_netto_summe(r)
+
+        kat_item = kategorien_map[kategorie]
+        kat_item["kosten_kategorie"] = kategorie
+        kat_item["anzahl_dokumente"] += 1
+        kat_item["summe_brutto"] += brutto
+        kat_item["summe_netto"] += netto
+        kat_item["lieferanten"].add(lieferant_name)
+
+        if is_rechnung(r):
+            kat_item["anzahl_rechnungen"] += 1
+        if is_gutschrift(r):
+            kat_item["anzahl_gutschriften"] += 1
+
+        lf_item = lieferanten_map[lieferant_key]
+        lf_item["lieferant_name"] = lieferant_name
+        lf_item["kosten_kategorie"] = kategorie
+        lf_item["anzahl_dokumente"] += 1
+        lf_item["summe_brutto"] += brutto
+        lf_item["summe_netto"] += netto
+
+        if is_rechnung(r):
+            lf_item["anzahl_rechnungen"] += 1
+        if is_gutschrift(r):
+            lf_item["anzahl_gutschriften"] += 1
+
+    kategorien = []
+    for _, v in kategorien_map.items():
+        kategorien.append({
+            "kosten_kategorie": v["kosten_kategorie"],
+            "zugeordnete_baustelle": v["zugeordnete_baustelle"],
+            "anzahl_lieferanten": len(v["lieferanten"]),
+            "anzahl_dokumente": v["anzahl_dokumente"],
+            "anzahl_rechnungen": v["anzahl_rechnungen"],
+            "anzahl_gutschriften": v["anzahl_gutschriften"],
+            "summe_brutto": round(v["summe_brutto"], 2),
+            "summe_netto": round(v["summe_netto"], 2),
+        })
+
+    kategorien.sort(key=lambda x: abs(x["summe_brutto"]), reverse=True)
+
+    lieferanten = []
+    for _, v in lieferanten_map.items():
+        lieferanten.append({
+            "lieferant_name": v["lieferant_name"],
+            "kosten_kategorie": v["kosten_kategorie"],
+            "zugeordnete_baustelle": v["zugeordnete_baustelle"],
+            "anzahl_dokumente": v["anzahl_dokumente"],
+            "anzahl_rechnungen": v["anzahl_rechnungen"],
+            "anzahl_gutschriften": v["anzahl_gutschriften"],
+            "summe_brutto": round(v["summe_brutto"], 2),
+            "summe_netto": round(v["summe_netto"], 2),
+        })
+
+    lieferanten.sort(key=lambda x: abs(x["summe_brutto"]), reverse=True)
+
+    return {
+        "betriebsadresse": betriebsadresse_raw or "",
+        "kategorien": kategorien,
+        "lieferanten_top20": lieferanten[:20],
+        "summe_brutto_gesamt": round(sum(x["summe_brutto"] for x in kategorien), 2),
+        "summe_netto_gesamt": round(sum(x["summe_netto"] for x in kategorien), 2),
+        "anzahl_kategorien": len(kategorien),
+        "anzahl_lieferanten": len(lieferanten),
+    }
+    
 def build_email_summary(summary, fachlicher_breakdown, payment, top_lieferanten, meta_report_type):
     parts = []
 
@@ -4032,6 +4213,8 @@ def strip_project_for_report(p: Dict[str, Any]) -> Dict[str, Any]:
         "erkannte_kostenstellen_alle": unique_nonempty(p.get("erkannte_kostenstellen_alle") or []),
         "erkannte_kostenstellen_plausibel": unique_nonempty(p.get("erkannte_kostenstellen_plausibel") or []),
         "erkannte_kommission": p.get("erkannte_kommission", ""),
+        "is_betriebskosten": bool(p.get("is_betriebskosten", False)),
+        "is_offene_projektkosten": bool(p.get("is_offene_projektkosten", False)),
         "anzahl_dokumente": safe_int(p.get("anzahl_dokumente", 0)),
         "anzahl_rechnungen": safe_int(p.get("anzahl_rechnungen", 0)),
         "anzahl_gutschriften": safe_int(p.get("anzahl_gutschriften", 0)),
@@ -4150,7 +4333,9 @@ def build_compact_analysis_response(
     project_relevante_docs: List[Dict[str, Any]],
     non_project_docs: List[Dict[str, Any]],
     projekt_cluster_diagnostics: Dict[str, Any],
+    betriebskosten_report: Dict[str, Any],
 ) -> Dict[str, Any]:
+
 
     fachlicher_breakdown_compact = compact_nonzero_dict(fachlicher_breakdown)
     technischer_breakdown_compact = compact_nonzero_dict(technischer_breakdown)
@@ -4160,6 +4345,16 @@ def build_compact_analysis_response(
 
     final_report_projects = [strip_project_for_report(p) for p in countable_project_clusters]
     unklare_report_projects = [strip_project_for_report(p) for p in non_countable_project_clusters]
+
+    offene_projektkosten_report = [
+        x for x in unklare_report_projects
+        if x.get("is_offene_projektkosten")
+    ]
+
+    betriebskosten_cluster_report = [
+        x for x in unklare_report_projects
+        if x.get("is_betriebskosten")
+    ]
 
     top_projekte_report = take_top(
         final_report_projects,
@@ -4213,9 +4408,10 @@ def build_compact_analysis_response(
         "anzahl_top_projekte_im_output": len(top_projekte_report),
         "anzahl_kritische_projekte_im_output": len(kritische_projekte_report),
         "anzahl_unklare_cluster": len(unklare_report_projects),
+            "anzahl_offene_projektkosten_cluster": len(offene_projektkosten_report),
+            "anzahl_betriebskosten_cluster": len(betriebskosten_cluster_report),
         "ausgefilterte_cluster_anzahl": safe_int(projekt_report_meta.get("ausgefilterte_cluster_anzahl", 0)),
     }
-
 
     hinweise_summary = {
         "fachlich_anzahl": len(fachliche_hinweise or []),
@@ -4251,13 +4447,31 @@ def build_compact_analysis_response(
         "top_projekte": top_projekte_report,
         "kritische_projekte": kritische_projekte_report,
         "unklare_projektzuordnungen": take_top(
-            unklare_report_projects,
+            [
+                x for x in unklare_report_projects
+                if not x.get("is_betriebskosten") and not x.get("is_offene_projektkosten")
+            ],
             limit=10,
             sort_key="nettoeffekt_brutto",
             reverse=True
         ),
-    }
+        "offene_projektkosten": take_top(
+            offene_projektkosten_report,
+            limit=10,
+            sort_key="nettoeffekt_brutto",
+            reverse=True
+        ),
+        "betriebskostenblock": {
+            "betriebsadresse": betriebskosten_report.get("betriebsadresse", ""),
+            "summe_brutto_gesamt": round2(betriebskosten_report.get("summe_brutto_gesamt", 0)),
+            "summe_netto_gesamt": round2(betriebskosten_report.get("summe_netto_gesamt", 0)),
+            "anzahl_kategorien": safe_int(betriebskosten_report.get("anzahl_kategorien", 0)),
+            "anzahl_lieferanten": safe_int(betriebskosten_report.get("anzahl_lieferanten", 0)),
+            "kategorien": betriebskosten_report.get("kategorien", [])[:10],
+            "lieferanten_top20": betriebskosten_report.get("lieferanten_top20", [])[:20],
+        },
 
+    }
 
     debug_output = {
         "internal_diagnostics": {
@@ -4495,6 +4709,12 @@ def analyze():
             lieferanten_kontext_map=lieferanten_kontext_map,
         )
 
+        betriebskosten_report = build_betriebskosten_report(
+            rechnungen_report=rechnungen_report,
+            lieferanten_kontext_map=lieferanten_kontext_map,
+            betriebsadresse_raw=betriebsadresse_raw,
+        )
+
         response_payload = build_compact_analysis_response(
             mode=mode,
             betrieb_id=betrieb_id,
@@ -4517,6 +4737,7 @@ def analyze():
 
             top_lieferanten=top_lieferanten,
             non_project_lieferanten=non_project_lieferanten,
+            betriebskosten_report=betriebskosten_report,
             lieferanten_kontext=lieferanten_kontext,
 
             gutschriften=gutschriften,
