@@ -3594,8 +3594,11 @@ def build_wichtige_faelle(fachliche_hinweis_details, gutschrift_details):
     return faelle[:10]
 
 def build_project_report_meta(projekt_cluster_report):
+    all_items = list(projekt_cluster_report or [])
+    countable_items = [x for x in all_items if is_countable_project_cluster(x)]
+
     sorted_items = sorted(
-        list(projekt_cluster_report or []),
+        countable_items,
         key=lambda x: x.get("nettoeffekt_brutto", 0),
         reverse=True
     )
@@ -3609,6 +3612,8 @@ def build_project_report_meta(projekt_cluster_report):
         key=lambda x: (x.get("confidence", 1), -x.get("nettoeffekt_brutto", 0))
     )[:5]
 
+    ausgefilterte = [x for x in all_items if not is_countable_project_cluster(x)]
+
     return {
         "anzahl_projekte": len(sorted_items),
         "anzahl_sicher": anzahl_sicher,
@@ -3616,7 +3621,49 @@ def build_project_report_meta(projekt_cluster_report):
         "anzahl_unsicher": anzahl_unsicher,
         "top_3_nach_nettoeffekt_brutto": sorted_items[:3],
         "top_5_unsicherste_projekte": unsicherste,
+        "ausgefilterte_cluster_anzahl": len(ausgefilterte),
+        "ausgefilterte_cluster_top10": sorted(
+            ausgefilterte,
+            key=lambda x: x.get("nettoeffekt_brutto", 0),
+            reverse=True
+        )[:10],
     }
+
+
+def is_countable_project_cluster(cluster):
+    if not cluster:
+        return False
+
+    if bool(cluster.get("is_lager")):
+        return True
+
+    anzahl_dokumente = int(cluster.get("anzahl_dokumente") or 0)
+    confidence = float(cluster.get("confidence") or 0)
+
+    kostenstelle = str(cluster.get("erkannte_kostenstelle") or "").strip()
+    baustelle = str(cluster.get("erkannte_baustelle") or "").strip()
+    kommission = str(cluster.get("erkannte_kommission") or "").strip()
+
+    kostenstelle_generisch = is_generic_kostenstelle(kostenstelle)
+
+    hat_starke_kostenstelle = bool(kostenstelle and not kostenstelle_generisch)
+    hat_baustelle = bool(baustelle)
+    hat_vollname = bool(kommission and is_full_person_name(kommission))
+
+    if hat_starke_kostenstelle:
+        return True
+
+    if hat_baustelle and confidence >= 0.70:
+        return True
+
+    if anzahl_dokumente >= 2 and hat_vollname and confidence >= 0.75:
+        return True
+
+    if anzahl_dokumente >= 2 and confidence >= 0.78:
+        return True
+
+    return False
+
 
 def build_project_cluster_diagnostics(projekt_cluster):
     stats = {
@@ -3778,6 +3825,410 @@ def build_email_summary(summary, fachlicher_breakdown, payment, top_lieferanten,
         )
 
     return " ".join(parts).strip()
+# ============================================================
+# ANALYSE / REPORT-HELPER
+# ============================================================
+
+from typing import List, Dict, Any, Optional
+from collections import defaultdict
+from datetime import datetime
+
+
+def safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value in [None, "", False]:
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def safe_int(value: Any, default: int = 0) -> int:
+    try:
+        if value in [None, "", False]:
+            return default
+        return int(float(value))
+    except Exception:
+        return default
+
+
+def round2(value: Any) -> float:
+    return round(safe_float(value), 2)
+
+
+def compact_nonzero_dict(d: Dict[str, Any]) -> Dict[str, Any]:
+    out = {}
+    for k, v in (d or {}).items():
+        if isinstance(v, (int, float)):
+            if v != 0:
+                out[k] = v
+        elif v not in [None, "", [], {}]:
+            out[k] = v
+    return out
+
+
+def take_top(items: List[Dict[str, Any]], limit: int = 10, sort_key: Optional[str] = None, reverse: bool = True) -> List[Dict[str, Any]]:
+    data = list(items or [])
+    if sort_key:
+        data.sort(key=lambda x: safe_float(x.get(sort_key, 0)), reverse=reverse)
+    return data[:limit]
+
+
+def get_brutto_summe(row: Dict[str, Any]) -> float:
+    return round2(
+        row.get("brutto_summe")
+        or row.get("Brutto_Summe")
+        or row.get("brutto")
+        or row.get("summe_brutto")
+        or row.get("Betrag_Brutto")
+        or 0
+    )
+
+
+def get_netto_summe(row: Dict[str, Any]) -> float:
+    return round2(
+        row.get("netto_summe")
+        or row.get("Netto_Summe")
+        or row.get("netto")
+        or row.get("summe_netto")
+        or row.get("Betrag_Netto")
+        or 0
+    )
+
+
+PROJECT_RELEVANT_KATEGORIEN = {
+    "GROSSHANDEL",
+    "HERSTELLER",
+    "SUBUNTERNEHMER",
+}
+
+NON_PROJECT_KATEGORIEN = {
+    "DIENSTLEISTER",
+    "WERKSTATT",
+    "FIXKOSTEN",
+    "ARBEITSKLEIDUNG",
+    "SONSTIGES",
+}
+
+
+def strip_lieferant_item(x: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "lieferant_name": x.get("lieferant_name", ""),
+        "lieferanten_typ": x.get("lieferanten_typ") or x.get("kosten_kategorie") or x.get("lieferantenkategorie") or "",
+        "anzahl_rechnungen": safe_int(x.get("anzahl_rechnungen", 0)),
+        "anzahl_gutschriften": safe_int(x.get("anzahl_gutschriften", 0)),
+        "summe_brutto": round2(x.get("summe_brutto", 0)),
+        "summe_netto": round2(x.get("summe_netto", 0)),
+        "auffaellige_rechnungen": safe_int(x.get("auffaellige_rechnungen", 0)),
+        "gepruefte_rechnungen": safe_int(x.get("gepruefte_rechnungen", 0)),
+    }
+
+
+def strip_payment_item(x: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "lieferant_name": x.get("lieferant_name", ""),
+        "rechnungsnummer": x.get("rechnungsnummer", ""),
+        "faelligkeitsdatum": x.get("faelligkeitsdatum", ""),
+        "brutto_summe": round2(x.get("brutto_summe", 0)),
+        "skonto_prozent": round2(x.get("skonto_prozent", 0)),
+        "skonto_betrag": round2(x.get("skonto_betrag", 0)),
+    }
+
+
+def strip_gutschrift_item(x: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "lieferant_name": x.get("lieferant_name", ""),
+        "rechnungsnummer": x.get("rechnungsnummer", ""),
+        "rechnungsdatum": x.get("rechnungsdatum", ""),
+        "referenznummer": x.get("referenznummer", ""),
+        "status": x.get("status", ""),
+        "brutto_summe": round2(x.get("brutto_summe", 0)),
+        "netto_summe": round2(x.get("netto_summe", 0)),
+    }
+
+
+def strip_project_for_report(p: Dict[str, Any]) -> Dict[str, Any]:
+    kostenstruktur = p.get("kostenstruktur") or {}
+
+    material_brutto = kostenstruktur.get("material_brutto", p.get("kostenstruktur_material_brutto", 0))
+    subunternehmer_brutto = kostenstruktur.get("subunternehmer_brutto", p.get("kostenstruktur_subunternehmer_brutto", 0))
+    sonstiges_brutto = kostenstruktur.get("sonstiges_brutto", p.get("kostenstruktur_sonstiges_brutto", 0))
+
+    top_lieferanten = []
+    for l in (p.get("top_3_lieferanten") or [])[:3]:
+        top_lieferanten.append({
+            "lieferant_name": l.get("lieferant_name", ""),
+            "projekt_kategorie": l.get("projekt_kategorie", ""),
+            "anzahl_dokumente": safe_int(l.get("anzahl_dokumente", 0)),
+            "summe_brutto": round2(l.get("summe_brutto", 0)),
+            "summe_netto": round2(l.get("summe_netto", 0)),
+        })
+
+    return {
+        "projekt_name": p.get("projekt_name") or p.get("projekt_name_report") or "",
+        "status": p.get("status", ""),
+        "confidence": round2(p.get("confidence", 0)),
+        "erkannte_baustelle": p.get("erkannte_baustelle", ""),
+        "erkannte_kostenstelle": p.get("erkannte_kostenstelle", ""),
+        "erkannte_kommission": p.get("erkannte_kommission", ""),
+        "anzahl_dokumente": safe_int(p.get("anzahl_dokumente", 0)),
+        "anzahl_rechnungen": safe_int(p.get("anzahl_rechnungen", 0)),
+        "anzahl_gutschriften": safe_int(p.get("anzahl_gutschriften", 0)),
+        "rechnung_summe_brutto": round2(p.get("rechnung_summe_brutto", 0)),
+        "rechnung_summe_netto": round2(p.get("rechnung_summe_netto", 0)),
+        "gutschrift_summe_brutto": round2(p.get("gutschrift_summe_brutto", 0)),
+        "gutschrift_summe_netto": round2(p.get("gutschrift_summe_netto", 0)),
+        "nettoeffekt_brutto": round2(p.get("nettoeffekt_brutto", 0)),
+        "nettoeffekt_netto": round2(p.get("nettoeffekt_netto", 0)),
+        "kostenstruktur": {
+            "material_brutto": round2(material_brutto),
+            "subunternehmer_brutto": round2(subunternehmer_brutto),
+            "sonstiges_brutto": round2(sonstiges_brutto),
+        },
+        "top_lieferanten": top_lieferanten,
+        "match_hinweise": (p.get("match_hinweise") or [])[:5],
+    }
+
+
+def aggregate_payment_by_lieferant(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    bucket = {}
+    for x in items or []:
+        name = x.get("lieferant_name", "") or "UNBEKANNT"
+        if name not in bucket:
+            bucket[name] = {
+                "lieferant_name": name,
+                "anzahl_rechnungen": 0,
+                "summe_brutto": 0.0,
+                "summe_skonto": 0.0,
+            }
+        bucket[name]["anzahl_rechnungen"] += 1
+        bucket[name]["summe_brutto"] += safe_float(x.get("brutto_summe", 0))
+        bucket[name]["summe_skonto"] += safe_float(x.get("skonto_betrag", 0))
+
+    out = list(bucket.values())
+    out.sort(key=lambda z: z["summe_brutto"], reverse=True)
+
+    return [
+        {
+            "lieferant_name": z["lieferant_name"],
+            "anzahl_rechnungen": z["anzahl_rechnungen"],
+            "summe_brutto": round(z["summe_brutto"], 2),
+            "summe_skonto": round(z["summe_skonto"], 2),
+        }
+        for z in out[:10]
+    ]
+
+
+def aggregate_skonto_by_lieferant(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    bucket = {}
+    for x in items or []:
+        name = x.get("lieferant_name", "") or "UNBEKANNT"
+        if name not in bucket:
+            bucket[name] = {
+                "lieferant_name": name,
+                "anzahl_rechnungen": 0,
+                "summe_skonto": 0.0,
+                "summe_brutto": 0.0,
+            }
+        bucket[name]["anzahl_rechnungen"] += 1
+        bucket[name]["summe_skonto"] += safe_float(x.get("skonto_betrag", 0))
+        bucket[name]["summe_brutto"] += safe_float(x.get("brutto_summe", 0))
+
+    out = list(bucket.values())
+    out.sort(key=lambda z: z["summe_skonto"], reverse=True)
+
+    return [
+        {
+            "lieferant_name": z["lieferant_name"],
+            "anzahl_rechnungen": z["anzahl_rechnungen"],
+            "summe_skonto": round(z["summe_skonto"], 2),
+            "summe_brutto": round(z["summe_brutto"], 2),
+        }
+        for z in out[:10]
+    ]
+
+
+def build_compact_analysis_response(
+    *,
+    mode: str,
+    betrieb_id: str,
+    zeitraum_start: Any,
+    zeitraum_ende: Any,
+    zeitraum: Dict[str, Any],
+    payment_start: Any,
+    payment_end: Any,
+
+    summary: Dict[str, Any],
+
+    fachliche_hinweise: List[Dict[str, Any]],
+    technische_hinweise: List[Dict[str, Any]],
+    fachlicher_breakdown: Dict[str, Any],
+    technischer_breakdown: Dict[str, Any],
+    fachliche_hinweise_by_rechnung: Dict[str, Any],
+    technische_hinweise_by_rechnung: Dict[str, Any],
+    fachliche_hinweis_details: List[Dict[str, Any]],
+
+    top_lieferanten: List[Dict[str, Any]],
+    non_project_lieferanten: List[Dict[str, Any]],
+    lieferanten_kontext: List[Dict[str, Any]],
+
+    gutschriften: List[Dict[str, Any]],
+    gutschrift_details: List[Dict[str, Any]],
+
+    projekt_cluster: List[Dict[str, Any]],
+    projekt_cluster_report: List[Dict[str, Any]],
+    projekt_report_meta: Dict[str, Any],
+    unklare_projekte: List[Dict[str, Any]],
+
+    payment: Dict[str, Any],
+    wichtige_faelle: List[Dict[str, Any]],
+    email_summary: str,
+
+    project_relevante_docs: List[Dict[str, Any]],
+    non_project_docs: List[Dict[str, Any]],
+    projekt_cluster_diagnostics: Dict[str, Any],
+) -> Dict[str, Any]:
+
+    fachlicher_breakdown_compact = compact_nonzero_dict(fachlicher_breakdown)
+    technischer_breakdown_compact = compact_nonzero_dict(technischer_breakdown)
+
+    final_report_projects = [strip_project_for_report(p) for p in (projekt_cluster_report or [])]
+
+    top_projekte_report = take_top(
+        final_report_projects,
+        limit=10,
+        sort_key="nettoeffekt_brutto",
+        reverse=True
+    )
+
+    kritische_projekte_report = take_top(
+        [p for p in final_report_projects if p.get("status") in ["MITTEL", "UNSICHER"]],
+        limit=10,
+        sort_key="nettoeffekt_brutto",
+        reverse=True
+    )
+
+    top_lieferanten_compact = [strip_lieferant_item(x) for x in (top_lieferanten or [])[:10]]
+    non_project_lieferanten_compact = [strip_lieferant_item(x) for x in (non_project_lieferanten or [])[:10]]
+
+    gutschriften_details_compact = [strip_gutschrift_item(x) for x in (gutschrift_details or [])[:10]]
+
+    faellige_rechnungen_compact = [strip_payment_item(x) for x in (payment.get("faellige_rechnungen") or [])[:10]]
+    skonto_chancen_compact = [strip_payment_item(x) for x in (payment.get("skonto_chancen") or [])[:10]]
+
+    payment_by_lieferant = aggregate_payment_by_lieferant(payment.get("faellige_rechnungen") or [])
+    skonto_by_lieferant = aggregate_skonto_by_lieferant(payment.get("skonto_chancen") or [])
+
+    report_summary = {
+        "rechnungen_gesamt": safe_int(summary.get("rechnungen_gesamt", 0)),
+        "gutschriften_gesamt": safe_int(summary.get("gutschriften_gesamt", 0)),
+        "unauffaellig": safe_int(summary.get("unauffaellig", 0)),
+        "auffaellig": safe_int(summary.get("auffaellig", 0)),
+        "summe_brutto_rechnungen": round2(summary.get("summe_brutto_rechnungen", 0)),
+        "summe_brutto_gutschriften": round2(summary.get("summe_brutto_gutschriften", 0)),
+        "summe_brutto_nettoeffekt": round2(summary.get("summe_brutto_nettoeffekt", 0)),
+        "summe_netto_rechnungen": round2(summary.get("summe_netto_rechnungen", 0)),
+        "summe_netto_gutschriften": round2(summary.get("summe_netto_gutschriften", 0)),
+        "summe_netto_nettoeffekt": round2(summary.get("summe_netto_nettoeffekt", 0)),
+        "projekt_relevante_dokumente": safe_int(summary.get("projekt_relevante_dokumente", 0)),
+        "nicht_projekt_relevante_dokumente": safe_int(summary.get("nicht_projekt_relevante_dokumente", 0)),
+        "geprueft": safe_int(summary.get("geprueft", 0)),
+        "offen": safe_int(summary.get("offen", 0)),
+        "abgelegt": safe_int(summary.get("abgelegt", 0)),
+        "nicht_abgelegt": safe_int(summary.get("nicht_abgelegt", 0)),
+    }
+
+    projekte_summary = {
+        "anzahl_projekte": safe_int(projekt_report_meta.get("anzahl_projekte", 0)),
+        "anzahl_sicher": safe_int(projekt_report_meta.get("anzahl_sicher", 0)),
+        "anzahl_mittel": safe_int(projekt_report_meta.get("anzahl_mittel", 0)),
+        "anzahl_unsicher": safe_int(projekt_report_meta.get("anzahl_unsicher", 0)),
+        "anzahl_top_projekte_im_output": len(top_projekte_report),
+        "anzahl_kritische_projekte_im_output": len(kritische_projekte_report),
+    }
+
+    hinweise_summary = {
+        "fachlich_anzahl": len(fachliche_hinweise or []),
+        "technisch_anzahl": len(technische_hinweise or []),
+        "fachlich_breakdown": fachlicher_breakdown_compact,
+        "technisch_breakdown": technischer_breakdown_compact,
+    }
+
+    gutschriften_summary = {
+        "anzahl": len(gutschriften or []),
+        "summe_brutto": round(sum(get_brutto_summe(r) for r in (gutschriften or [])), 2),
+        "summe_netto": round(sum(get_netto_summe(r) for r in (gutschriften or [])), 2),
+        "details_top10": gutschriften_details_compact,
+    }
+
+    zahlungen_summary = {
+        "basis_start": str(payment_start) if payment_start else "",
+        "basis_ende": str(payment_end) if payment_end else "",
+        "faellige_rechnungen_anzahl": safe_int(payment.get("faellige_rechnungen_anzahl", 0)),
+        "summe_faellig": round2(payment.get("summe_faellig", 0)),
+        "faellige_rechnungen_top10": faellige_rechnungen_compact,
+        "faellige_rechnungen_nach_lieferant_top10": payment_by_lieferant,
+        "skonto_chancen_top10": skonto_chancen_compact,
+        "skonto_nach_lieferant_top10": skonto_by_lieferant,
+    }
+
+    lieferanten_report = {
+        "top_lieferanten": top_lieferanten_compact,
+        "nicht_projekt_relevant_top10": non_project_lieferanten_compact,
+    }
+
+    projekte_report = {
+        "top_projekte": top_projekte_report,
+        "kritische_projekte": kritische_projekte_report,
+    }
+
+    debug_output = {
+        "internal_diagnostics": {
+            "technische_hinweise_anzahl": len(technische_hinweise or []),
+            "rechnungen_mit_fachlichen_hinweisen": len(fachliche_hinweise_by_rechnung or {}),
+            "rechnungen_mit_technischen_hinweisen": len(technische_hinweise_by_rechnung or {}),
+            "project_relevante_dokumente": len(project_relevante_docs or []),
+            "non_project_relevante_dokumente": len(non_project_docs or []),
+            "projekt_cluster_diagnostics": projekt_cluster_diagnostics or {},
+        },
+        "fachliche_hinweise_details_top25": (fachliche_hinweis_details or [])[:25],
+        "unklare_projektzuordnungen_top10": take_top(
+            [strip_project_for_report(p) for p in (unklare_projekte or [])],
+            limit=10,
+            sort_key="nettoeffekt_brutto",
+            reverse=True
+        ),
+        "wichtige_faelle_top10": (wichtige_faelle or [])[:10],
+        "lieferanten_kontext_top50": (lieferanten_kontext or [])[:50],
+        "email_summary": email_summary or "",
+    }
+
+    return {
+        "ok": True,
+        "meta": {
+            "report_type": mode,
+            "betrieb_id": betrieb_id,
+            "zeitraum_start": str(zeitraum_start) if zeitraum_start else str(zeitraum.get("start") or ""),
+            "zeitraum_ende": str(zeitraum_ende) if zeitraum_ende else str(zeitraum.get("ende") or ""),
+            "payment_basis_start": str(payment_start) if payment_start else "",
+            "payment_basis_ende": str(payment_end) if payment_end else "",
+            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "analyze_version": "v6-compact-report-output",
+        },
+        "report_summary": report_summary,
+        "projekte_summary": projekte_summary,
+        "hinweise_summary": hinweise_summary,
+        "gutschriften_summary": gutschriften_summary,
+        "zahlungen_summary": zahlungen_summary,
+        "lieferanten_report": lieferanten_report,
+        "projekte_report": projekte_report,
+        "report_highlights": {
+            "email_summary": email_summary or "",
+            "wichtige_faelle_top10": (wichtige_faelle or [])[:10],
+        },
+        "debug": debug_output,
+    }
+
 
 @app.route("/analyze", methods=["POST"])
 def analyze():
@@ -3974,70 +4425,48 @@ def analyze():
             lieferanten_kontext_map=lieferanten_kontext_map,
         )
 
-        return jsonify({
-            "ok": True,
-            "meta": {
-                "report_type": mode,
-                "betrieb_id": betrieb_id,
-                "zeitraum_start": str(zeitraum_start) if zeitraum_start else str(zeitraum.get("start") or ""),
-                "zeitraum_ende": str(zeitraum_ende) if zeitraum_ende else str(zeitraum.get("ende") or ""),
-                "payment_basis_start": str(payment_start) if payment_start else "",
-                "payment_basis_ende": str(payment_end) if payment_end else "",
-                "generated_at": datetime.utcnow().isoformat() + "Z",
-                "analyze_version": "v5-project-category-routing"
-            },
+        response_payload = build_compact_analysis_response(
+            mode=mode,
+            betrieb_id=betrieb_id,
+            zeitraum_start=zeitraum_start,
+            zeitraum_ende=zeitraum_ende,
+            zeitraum=zeitraum,
 
-            "summary": summary,
-            "verarbeitung": {
-                "geprueft": summary["geprueft"],
-                "offen": summary["offen"],
-                "abgelegt": summary["abgelegt"],
-                "nicht_abgelegt": summary["nicht_abgelegt"],
-            },
-            "hinweise": {
-                "fachlich_anzahl": len(fachliche_hinweise),
-                "technisch_anzahl": len(technische_hinweise),
-                "fachlich_breakdown": fachlicher_breakdown,
-                "technisch_breakdown": technischer_breakdown,
-            },
-            "lieferanten": {
-                "top_lieferanten": top_lieferanten,
-                "nicht_projekt_relevant": non_project_lieferanten,
-            },
-            "lieferanten_kontext": {
-                "anzahl": len(lieferanten_kontext),
-                "eintraege": lieferanten_kontext[:50],
-            },
-            "gutschriften": {
-                "anzahl": len(gutschriften),
-                "summe_brutto": round(sum(get_brutto_summe(r) for r in gutschriften), 2),
-                "summe_netto": round(sum(get_netto_summe(r) for r in gutschriften), 2),
-                "details": gutschrift_details,
-            },
-            "projekt_cluster": projekt_cluster,
-            "projekt_cluster_report": projekt_cluster_report,
-            "projekt_report_meta": projekt_report_meta,
-            "payment": payment,
-            "report_highlights": {
-                "wichtigste_faelle": wichtige_faelle
-            },
-            "email_summary": email_summary,
-            "optional_details": {
-                "fachliche_hinweise_details": fachliche_hinweis_details[:25],
-                "unklare_projektzuordnungen": unklare_projekte,
-                "projekt_cluster_report_top10": projekt_cluster_report_top10,
-            },
-            "internal_diagnostics": {
-                "technische_hinweise_anzahl": len(technische_hinweise),
-                "technische_breakdown": technischer_breakdown,
-                "rechnungen_mit_fachlichen_hinweisen": len(fachliche_hinweise_by_rechnung),
-                "rechnungen_mit_technischen_hinweisen": len(technische_hinweise_by_rechnung),
-                "project_relevante_dokumente": len(project_relevante_docs),
-                "non_project_relevante_dokumente": len(non_project_docs),
-                "projekt_cluster_diagnostics": projekt_cluster_diagnostics,
-            }
+            payment_start=payment_start,
+            payment_end=payment_end,
 
-        }), 200
+            summary=summary,
+
+            fachliche_hinweise=fachliche_hinweise,
+            technische_hinweise=technische_hinweise,
+            fachlicher_breakdown=fachlicher_breakdown,
+            technischer_breakdown=technischer_breakdown,
+            fachliche_hinweise_by_rechnung=fachliche_hinweise_by_rechnung,
+            technische_hinweise_by_rechnung=technische_hinweise_by_rechnung,
+            fachliche_hinweis_details=fachliche_hinweis_details,
+
+            top_lieferanten=top_lieferanten,
+            non_project_lieferanten=non_project_lieferanten,
+            lieferanten_kontext=lieferanten_kontext,
+
+            gutschriften=gutschriften,
+            gutschrift_details=gutschrift_details,
+
+            projekt_cluster=projekt_cluster,
+            projekt_cluster_report=projekt_cluster_report,
+            projekt_report_meta=projekt_report_meta,
+            unklare_projekte=unklare_projekte,
+
+            payment=payment,
+            wichtige_faelle=wichtige_faelle,
+            email_summary=email_summary,
+
+            project_relevante_docs=project_relevante_docs,
+            non_project_docs=non_project_docs,
+            projekt_cluster_diagnostics=projekt_cluster_diagnostics,
+        )
+
+        return jsonify(response_payload), 200
 
     except Exception as e:
         return jsonify({
