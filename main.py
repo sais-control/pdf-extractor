@@ -1833,7 +1833,9 @@ def canonical_dokumenttyp(value):
     s = str(value or "").strip().upper()
     if s == "GUTSCHRIFT":
         return "GUTSCHRIFT"
-    return "RECHNUNG"
+    if s == "RECHNUNG":
+        return "RECHNUNG"
+    return "SONSTIGES"
 
 def canonical_lieferanten_kategorie(value):
     s = str(value or "").strip().upper()
@@ -2484,11 +2486,10 @@ def build_project_cluster_supplier_stats(cluster_rechnungen, lieferanten_kontext
     result.sort(key=lambda x: x.get("summe_brutto", 0), reverse=True)
     return result
 
-def build_project_clusters(rechnungen, historische_rechnungen=None, lieferanten_kontext_map=None, betriebsadresse_key=""):
-    historische_rechnungen = historische_rechnungen or []
+def build_project_clusters(rechnungen, lieferanten_kontext_map=None, betriebsadresse_key=""):
     lieferanten_kontext_map = lieferanten_kontext_map or {}
 
-    all_docs = list(rechnungen) + list(historische_rechnungen)
+    all_docs = list(rechnungen)
     prepared = []
 
     def is_lager_item(feat):
@@ -3829,11 +3830,6 @@ def build_email_summary(summary, fachlicher_breakdown, payment, top_lieferanten,
 # ANALYSE / REPORT-HELPER
 # ============================================================
 
-from typing import List, Dict, Any, Optional
-from collections import defaultdict
-from datetime import datetime
-
-
 def safe_float(value: Any, default: float = 0.0) -> float:
     try:
         if value in [None, "", False]:
@@ -3872,29 +3868,6 @@ def take_top(items: List[Dict[str, Any]], limit: int = 10, sort_key: Optional[st
     if sort_key:
         data.sort(key=lambda x: safe_float(x.get(sort_key, 0)), reverse=reverse)
     return data[:limit]
-
-
-def get_brutto_summe(row: Dict[str, Any]) -> float:
-    return round2(
-        row.get("brutto_summe")
-        or row.get("Brutto_Summe")
-        or row.get("brutto")
-        or row.get("summe_brutto")
-        or row.get("Betrag_Brutto")
-        or 0
-    )
-
-
-def get_netto_summe(row: Dict[str, Any]) -> float:
-    return round2(
-        row.get("netto_summe")
-        or row.get("Netto_Summe")
-        or row.get("netto")
-        or row.get("summe_netto")
-        or row.get("Betrag_Netto")
-        or 0
-    )
-
 
 PROJECT_RELEVANT_KATEGORIEN = {
     "GROSSHANDEL",
@@ -3989,6 +3962,8 @@ def strip_project_for_report(p: Dict[str, Any]) -> Dict[str, Any]:
         "match_hinweise": (p.get("match_hinweise") or [])[:5],
     }
 
+def filter_countable_projects_for_report(projects: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [p for p in (projects or []) if is_countable_project_cluster(p)]
 
 def aggregate_payment_by_lieferant(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     bucket = {}
@@ -4092,7 +4067,11 @@ def build_compact_analysis_response(
     fachlicher_breakdown_compact = compact_nonzero_dict(fachlicher_breakdown)
     technischer_breakdown_compact = compact_nonzero_dict(technischer_breakdown)
 
-    final_report_projects = [strip_project_for_report(p) for p in (projekt_cluster_report or [])]
+    countable_project_clusters = filter_countable_projects_for_report(projekt_cluster_report or [])
+    non_countable_project_clusters = [p for p in (projekt_cluster_report or []) if not is_countable_project_cluster(p)]
+
+    final_report_projects = [strip_project_for_report(p) for p in countable_project_clusters]
+    unklare_report_projects = [strip_project_for_report(p) for p in non_countable_project_clusters]
 
     top_projekte_report = take_top(
         final_report_projects,
@@ -4145,7 +4124,10 @@ def build_compact_analysis_response(
         "anzahl_unsicher": safe_int(projekt_report_meta.get("anzahl_unsicher", 0)),
         "anzahl_top_projekte_im_output": len(top_projekte_report),
         "anzahl_kritische_projekte_im_output": len(kritische_projekte_report),
+        "anzahl_unklare_cluster": len(unklare_report_projects),
+        "ausgefilterte_cluster_anzahl": safe_int(projekt_report_meta.get("ausgefilterte_cluster_anzahl", 0)),
     }
+
 
     hinweise_summary = {
         "fachlich_anzahl": len(fachliche_hinweise or []),
@@ -4180,7 +4162,14 @@ def build_compact_analysis_response(
     projekte_report = {
         "top_projekte": top_projekte_report,
         "kritische_projekte": kritische_projekte_report,
+        "unklare_projektzuordnungen": take_top(
+            unklare_report_projects,
+            limit=10,
+            sort_key="nettoeffekt_brutto",
+            reverse=True
+        ),
     }
+
 
     debug_output = {
         "internal_diagnostics": {
@@ -4193,11 +4182,12 @@ def build_compact_analysis_response(
         },
         "fachliche_hinweise_details_top25": (fachliche_hinweis_details or [])[:25],
         "unklare_projektzuordnungen_top10": take_top(
-            [strip_project_for_report(p) for p in (unklare_projekte or [])],
+            unklare_report_projects,
             limit=10,
             sort_key="nettoeffekt_brutto",
             reverse=True
         ),
+
         "wichtige_faelle_top10": (wichtige_faelle or [])[:10],
         "lieferanten_kontext_top50": (lieferanten_kontext or [])[:50],
         "email_summary": email_summary or "",
@@ -4256,7 +4246,6 @@ def analyze():
 
         rechnungen = data.get("rechnungen", []) or []
         hinweise = data.get("hinweise", []) or []
-        historische_rechnungen = data.get("historische_rechnungen", []) or []
 
         betriebskontext = data.get("betriebskontext", {}) or {}
         betriebsadresse_raw = (
@@ -4299,7 +4288,7 @@ def analyze():
             if rid:
                 rechnung_map[rid] = r
 
-        lookup_rechnungen = list(rechnungen) + list(historische_rechnungen)
+        lookup_rechnungen = list(rechnungen)
         lieferanten_kontext_map = build_lieferanten_kontext_map(lieferanten_kontext)
 
         fachliche_hinweise = []
@@ -4383,7 +4372,6 @@ def analyze():
 
         projekt_cluster = build_project_clusters(
             rechnungen=rechnungen_report,
-            historische_rechnungen=[],
             lieferanten_kontext_map=lieferanten_kontext_map,
             betriebsadresse_key=betriebsadresse_key,
         )
@@ -4396,12 +4384,6 @@ def analyze():
 
         projekt_report_meta = build_project_report_meta(projekt_cluster_report)
         projekt_cluster_diagnostics = build_project_cluster_diagnostics(projekt_cluster)
-
-        projekt_cluster_report_top10 = sorted(
-            projekt_cluster_report,
-            key=lambda x: x.get("nettoeffekt_brutto", 0),
-            reverse=True
-        )[:10]
 
         unklare_projekte = [
             x for x in projekt_cluster
