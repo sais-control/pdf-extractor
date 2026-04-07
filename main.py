@@ -501,8 +501,15 @@ def extract_text_ocr_best(pdf_bytes: bytes):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     pages = []
 
+    max_ocr_pages = 3
+    render_scale = 1.35
+    tesseract_timeout_sec = 4
+
     for i, page in enumerate(doc):
-        pix = page.get_pixmap(matrix=fitz.Matrix(1.8, 1.8), alpha=False)
+        if i >= max_ocr_pages:
+            break
+
+        pix = page.get_pixmap(matrix=fitz.Matrix(render_scale, render_scale), alpha=False)
         original_img = Image.open(io.BytesIO(pix.tobytes("png")))
 
         best_text = ""
@@ -516,9 +523,10 @@ def extract_text_ocr_best(pdf_bytes: bytes):
                 text = pytesseract.image_to_string(
                     img_variant,
                     lang="deu",
-                    timeout=8
+                    timeout=tesseract_timeout_sec
                 ) or ""
                 score = score_ocr_text(text)
+
                 if score > best_score:
                     best_score = score
                     best_text = text
