@@ -534,7 +534,7 @@ def extract_text_ocr_best(pdf_bytes: bytes):
 
             except RuntimeError:
                 continue
-            except Exception:
+            except BaseException:
                 continue
 
         pages.append({
@@ -1269,7 +1269,7 @@ def extract_pdf():
                     text_full, pages = text_ocr, pages_ocr
                     text_engine = "ocr_tesseract_best"
                     ocr_used = True
-            except Exception as e:
+            except BaseException as e:
                 ocr_error = f"OCR_FAILED: {str(e)}"
 
         if not norm(text_full):
@@ -1345,7 +1345,7 @@ def extract_pdf():
             )
             return jsonify(result), 200
 
-        except Exception as e:
+        except BaseException as e:
             return jsonify({
                 "ok": False,
                 "error": "parse_failed",
