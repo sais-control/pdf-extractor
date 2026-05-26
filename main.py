@@ -12,6 +12,7 @@ from datetime import datetime, date, timezone, timedelta
 from difflib import SequenceMatcher
 import math
 import unicodedata
+import xml.etree.ElementTree as ET
 app = Flask(__name__)
 
 # ============================================================
@@ -1463,6 +1464,469 @@ def extract_pdf():
                 "pdfplumber_error": None,
                 "ocr_error": None,
             }
+        }), 200
+# ============================================================
+# E-RECHNUNG / XML CHECK V1
+# ============================================================
+
+EINVOICE_FORMAT_VALUES = {"ZUGFERD", "FACTUR_X", "XRECHNUNG", "UBL", "CII", "UNBEKANNT"}
+EINVOICE_PROFILE_VALUES = {"BASIC", "COMFORT", "EN16931", "EXTENDED", "UNBEKANNT"}
+
+def safe_text(value):
+    return str(value or "").strip()
+
+def local_name(tag):
+    tag = str(tag or "")
+    if "}" in tag:
+        return tag.split("}", 1)[1]
+    return tag
+
+def xml_bytes_to_text(xml_bytes):
+    if not xml_bytes:
+        return ""
+
+    encodings = ["utf-8-sig", "utf-8", "iso-8859-1", "cp1252"]
+    for enc in encodings:
+        try:
+            return xml_bytes.decode(enc)
+        except Exception:
+            pass
+
+    return xml_bytes.decode("utf-8", errors="replace")
+
+def parse_xml_root(xml_text):
+    try:
+        return ET.fromstring(xml_text.encode("utf-8"))
+    except Exception:
+        try:
+            return ET.fromstring(xml_text)
+        except Exception:
+            return None
+
+def find_all_by_local(root, names):
+    if root is None:
+        return []
+
+    wanted = {n.lower() for n in names}
+    out = []
+
+    for el in root.iter():
+        if local_name(el.tag).lower() in wanted:
+            out.append(el)
+
+    return out
+
+def first_text_by_local(root, names):
+    for el in find_all_by_local(root, names):
+        txt = safe_text(el.text)
+        if txt:
+            return txt
+    return ""
+
+def all_decimal_values_by_local(root, names):
+    values = []
+    for el in find_all_by_local(root, names):
+        txt = safe_text(el.text)
+        if not txt:
+            continue
+        val = to_float_safe(txt)
+        values.append(val)
+    return values
+
+def detect_xml_format_and_profile(xml_text, filename=""):
+    text_l = lower(xml_text)
+    filename_l = lower(filename)
+
+    fmt = "UNBEKANNT"
+    profile = "UNBEKANNT"
+
+    if "crossindustryinvoice" in text_l or "rsm:crossindustryinvoice" in text_l:
+        fmt = "CII"
+
+    if "ubl:invoice" in text_l or "<invoice" in text_l and "urn:oasis:names:specification:ubl" in text_l:
+        fmt = "UBL"
+
+    if "xrechnung" in text_l or "leitweg-id" in text_l or "leitwegid" in text_l:
+        fmt = "XRECHNUNG"
+
+    if "factur-x" in filename_l or "factur-x" in text_l:
+        fmt = "FACTUR_X"
+
+    if "zugferd" in filename_l or "zugferd" in text_l:
+        fmt = "ZUGFERD"
+
+    if "basic" in text_l:
+        profile = "BASIC"
+    if "comfort" in text_l:
+        profile = "COMFORT"
+    if "en16931" in text_l or "en 16931" in text_l:
+        profile = "EN16931"
+    if "extended" in text_l:
+        profile = "EXTENDED"
+
+    return fmt, profile
+
+def extract_embedded_xml_from_pdf(pdf_bytes):
+    found = []
+
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    except Exception as e:
+        return [], f"PDF_OPEN_FAILED: {str(e)}"
+
+    try:
+        count = doc.embfile_count()
+    except Exception:
+        count = 0
+
+    for i in range(count):
+        filename = ""
+        content = b""
+
+        try:
+            info = doc.embfile_info(i)
+            filename = safe_text(info.get("filename") or info.get("name") or f"embedded_{i}")
+        except Exception:
+            filename = f"embedded_{i}"
+
+        try:
+            content = doc.embfile_get(i)
+        except Exception:
+            try:
+                content = doc.embfile_get(filename)
+            except Exception:
+                content = b""
+
+        if not content:
+            continue
+
+        is_xml_name = filename.lower().endswith(".xml") or any(x in filename.lower() for x in [
+            "factur",
+            "zugferd",
+            "xrechnung",
+            "invoice",
+            "ubl",
+            "cii",
+        ])
+
+        looks_xml = content[:200].lstrip().startswith(b"<?xml") or content[:200].lstrip().startswith(b"<")
+
+        if is_xml_name or looks_xml:
+            xml_text = xml_bytes_to_text(content)
+            found.append({
+                "xml_dateiname": filename,
+                "xml_text": xml_text,
+                "xml_bytes_len": len(content),
+            })
+
+    return found, ""
+
+def validate_einvoice_xml(xml_text):
+    hinweise = []
+
+    root = parse_xml_root(xml_text)
+    if root is None:
+        return {
+            "xml_lesbar": "NEIN",
+            "pflichtfelder_ok": "NEIN",
+            "summenpruefung_ok": "UNKLAR",
+            "fehler": "XML_PARSE_FAILED",
+            "hinweise": ["XML konnte nicht geparst werden"],
+            "felder": {},
+        }
+
+    root_name = local_name(root.tag)
+
+    rechnungsnummer = first_text_by_local(root, [
+        "ID",
+        "InvoiceNumber",
+        "BuyerReference",
+    ])
+
+    rechnungsdatum = first_text_by_local(root, [
+        "IssueDateTime",
+        "IssueDate",
+        "DateTimeString",
+    ])
+
+    waehrung = first_text_by_local(root, [
+        "DocumentCurrencyCode",
+        "InvoiceCurrencyCode",
+        "TaxCurrencyCode",
+    ])
+
+    lieferant = first_text_by_local(root, [
+        "SellerTradeParty",
+        "AccountingSupplierParty",
+        "SellerSupplierParty",
+        "Name",
+    ])
+
+    kunde = first_text_by_local(root, [
+        "BuyerTradeParty",
+        "AccountingCustomerParty",
+        "BuyerCustomerParty",
+        "Name",
+    ])
+
+    positionen = find_all_by_local(root, [
+        "IncludedSupplyChainTradeLineItem",
+        "InvoiceLine",
+        "CreditNoteLine",
+    ])
+
+    netto_candidates = all_decimal_values_by_local(root, [
+        "TaxBasisTotalAmount",
+        "LineTotalAmount",
+        "TaxExclusiveAmount",
+        "BasisAmount",
+    ])
+
+    mwst_candidates = all_decimal_values_by_local(root, [
+        "TaxTotalAmount",
+        "CalculatedAmount",
+        "TaxAmount",
+    ])
+
+    brutto_candidates = all_decimal_values_by_local(root, [
+        "GrandTotalAmount",
+        "DuePayableAmount",
+        "TaxInclusiveAmount",
+        "PayableAmount",
+    ])
+
+    gesamt_netto = netto_candidates[-1] if netto_candidates else 0.0
+    gesamt_mwst = mwst_candidates[-1] if mwst_candidates else 0.0
+    gesamt_brutto = brutto_candidates[-1] if brutto_candidates else 0.0
+
+    pflichtfelder = {
+        "rechnungsnummer": bool(rechnungsnummer),
+        "rechnungsdatum": bool(rechnungsdatum),
+        "lieferant": bool(lieferant),
+        "kunde": bool(kunde),
+        "positionen": len(positionen) > 0,
+        "gesamt_netto": bool(netto_candidates),
+        "gesamt_mwst": bool(mwst_candidates),
+        "gesamt_brutto": bool(brutto_candidates),
+        "waehrung": bool(waehrung),
+    }
+
+    fehlende = [k for k, ok in pflichtfelder.items() if not ok]
+
+    if fehlende:
+        hinweise.append("Fehlende Pflichtfelder: " + ", ".join(fehlende))
+
+    pflichtfelder_ok = "JA" if not fehlende else "NEIN"
+
+    summenpruefung_ok = "UNKLAR"
+    if gesamt_netto and gesamt_brutto:
+        expected = round(gesamt_netto + gesamt_mwst, 2)
+        actual = round(gesamt_brutto, 2)
+        diff = abs(expected - actual)
+
+        if diff <= 0.03:
+            summenpruefung_ok = "JA"
+        else:
+            summenpruefung_ok = "NEIN"
+            hinweise.append(f"Summenprüfung unplausibel: Netto + MwSt = {expected}, Brutto = {actual}")
+
+    return {
+        "xml_lesbar": "JA",
+        "pflichtfelder_ok": pflichtfelder_ok,
+        "summenpruefung_ok": summenpruefung_ok,
+        "fehler": "",
+        "hinweise": hinweise,
+        "felder": {
+            "root": root_name,
+            "rechnungsnummer": rechnungsnummer,
+            "rechnungsdatum": rechnungsdatum,
+            "lieferant": lieferant,
+            "kunde": kunde,
+            "positionen_anzahl": len(positionen),
+            "gesamt_netto": gesamt_netto,
+            "gesamt_mwst": gesamt_mwst,
+            "gesamt_brutto": gesamt_brutto,
+            "waehrung": waehrung,
+        },
+    }
+
+def build_empty_einvoice_result(error="", hinweise=None):
+    return {
+        "ok": True,
+        "e_rechnung_erkannt": "NEIN",
+        "xml_vorhanden": "NEIN",
+        "xml_lesbar": "NEIN",
+        "format": "UNBEKANNT",
+        "profil": "UNBEKANNT",
+        "xml_dateiname": "",
+        "xml_text": "",
+        "xml_text_truncated": False,
+        "pflichtfelder_ok": "UNKLAR",
+        "summenpruefung_ok": "UNKLAR",
+        "xml_nutzbar": "NEIN",
+        "e_rechnung_extraktion_status": "XML_NICHT_GEFUNDEN",
+        "e_rechnung_quelle": "GPT",
+        "fehler": error,
+        "hinweise": hinweise or [],
+        "felder": {},
+    }
+
+def build_einvoice_result_from_xml(xml_text, xml_dateiname, max_xml_text_chars=200000):
+    fmt, profile = detect_xml_format_and_profile(xml_text, xml_dateiname)
+    validation = validate_einvoice_xml(xml_text)
+
+    e_rechnung_erkannt = "JA" if fmt in {"ZUGFERD", "FACTUR_X", "XRECHNUNG", "UBL", "CII"} else "UNKLAR"
+
+    xml_nutzbar = "JA" if (
+        e_rechnung_erkannt == "JA"
+        and validation["xml_lesbar"] == "JA"
+        and validation["pflichtfelder_ok"] == "JA"
+        and validation["summenpruefung_ok"] == "JA"
+    ) else "NEIN"
+
+    if xml_nutzbar == "JA":
+        status = "XML_EXTRAHIERT"
+        quelle = "XML"
+    else:
+        if validation["xml_lesbar"] == "NEIN":
+            status = "XML_FEHLER"
+        else:
+            status = "XML_UNVOLLSTAENDIG"
+        quelle = "FALLBACK_GPT"
+
+    xml_text_out = xml_text or ""
+    truncated = False
+
+    if max_xml_text_chars and len(xml_text_out) > max_xml_text_chars:
+        xml_text_out = xml_text_out[:max_xml_text_chars]
+        truncated = True
+
+    return {
+        "ok": True,
+        "e_rechnung_erkannt": e_rechnung_erkannt,
+        "xml_vorhanden": "JA",
+        "xml_lesbar": validation["xml_lesbar"],
+        "format": fmt if fmt in EINVOICE_FORMAT_VALUES else "UNBEKANNT",
+        "profil": profile if profile in EINVOICE_PROFILE_VALUES else "UNBEKANNT",
+        "xml_dateiname": xml_dateiname or "",
+        "xml_text": xml_text_out,
+        "xml_text_truncated": truncated,
+        "pflichtfelder_ok": validation["pflichtfelder_ok"],
+        "summenpruefung_ok": validation["summenpruefung_ok"],
+        "xml_nutzbar": xml_nutzbar,
+        "e_rechnung_extraktion_status": status,
+        "e_rechnung_quelle": quelle,
+        "fehler": validation["fehler"],
+        "hinweise": validation["hinweise"],
+        "felder": validation["felder"],
+    }
+
+@app.route("/check_einvoice", methods=["POST"])
+def check_einvoice():
+    try:
+        if "file" not in request.files:
+            return jsonify(build_empty_einvoice_result(
+                error="NO_FILE_PROVIDED",
+                hinweise=["Keine Datei im Feld 'file' übergeben"]
+            )), 200
+
+        file = request.files["file"]
+        filename = safe_text(file.filename)
+        file_bytes = file.read()
+
+        max_xml_text_chars = request.form.get("max_xml_text_chars", "").strip()
+        try:
+            max_xml_text_chars = int(max_xml_text_chars) if max_xml_text_chars else 200000
+        except Exception:
+            max_xml_text_chars = 200000
+
+        if not filename:
+            return jsonify(build_empty_einvoice_result(
+                error="EMPTY_FILENAME",
+                hinweise=["Dateiname fehlt"]
+            )), 200
+
+        filename_l = filename.lower()
+
+        # Fall 1: separate XML-Datei direkt prüfen
+        if filename_l.endswith(".xml"):
+            xml_text = xml_bytes_to_text(file_bytes)
+            result = build_einvoice_result_from_xml(
+                xml_text=xml_text,
+                xml_dateiname=filename,
+                max_xml_text_chars=max_xml_text_chars,
+            )
+            return jsonify(result), 200
+
+        # Fall 2: PDF auf eingebettete XML prüfen
+        if not filename_l.endswith(".pdf"):
+            return jsonify(build_empty_einvoice_result(
+                error="INVALID_FILE_TYPE",
+                hinweise=["Datei ist weder PDF noch XML"]
+            )), 200
+
+        embedded_xmls, pdf_error = extract_embedded_xml_from_pdf(file_bytes)
+
+        if not embedded_xmls:
+            return jsonify(build_empty_einvoice_result(
+                error=pdf_error,
+                hinweise=["Keine eingebettete XML-Datei im PDF gefunden"]
+            )), 200
+
+        # Beste XML auswählen: bevorzugt bekannte E-Rechnungs-Dateinamen/Formate
+        scored = []
+        for item in embedded_xmls:
+            xml_text = item.get("xml_text") or ""
+            xml_dateiname = item.get("xml_dateiname") or ""
+            fmt, profile = detect_xml_format_and_profile(xml_text, xml_dateiname)
+
+            score = 0
+            if fmt != "UNBEKANNT":
+                score += 50
+            if profile != "UNBEKANNT":
+                score += 20
+            if any(x in xml_dateiname.lower() for x in ["factur", "zugferd", "xrechnung", "invoice", "ubl"]):
+                score += 20
+            if parse_xml_root(xml_text) is not None:
+                score += 30
+
+            scored.append((score, item))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        best_xml = scored[0][1]
+
+        result = build_einvoice_result_from_xml(
+            xml_text=best_xml.get("xml_text") or "",
+            xml_dateiname=best_xml.get("xml_dateiname") or "",
+            max_xml_text_chars=max_xml_text_chars,
+        )
+
+        result["eingebettete_xml_anzahl"] = len(embedded_xmls)
+        result["eingebettete_xml_dateien"] = [
+            safe_text(x.get("xml_dateiname")) for x in embedded_xmls
+        ]
+
+        return jsonify(result), 200
+
+    except Exception as e:
+        return jsonify({
+            "ok": False,
+            "e_rechnung_erkannt": "UNKLAR",
+            "xml_vorhanden": "UNKLAR",
+            "xml_lesbar": "NEIN",
+            "format": "UNBEKANNT",
+            "profil": "UNBEKANNT",
+            "xml_dateiname": "",
+            "xml_text": "",
+            "xml_text_truncated": False,
+            "pflichtfelder_ok": "UNKLAR",
+            "summenpruefung_ok": "UNKLAR",
+            "xml_nutzbar": "NEIN",
+            "e_rechnung_extraktion_status": "XML_FEHLER",
+            "e_rechnung_quelle": "FALLBACK_GPT",
+            "fehler": str(e),
+            "hinweise": ["Unerwarteter Fehler bei E-Rechnungsprüfung"],
+            "felder": {},
         }), 200
         
 # ============================================================
