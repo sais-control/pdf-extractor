@@ -1527,6 +1527,33 @@ def xml_to_float(value):
     except Exception:
         return None
 
+def xml_normalize_date(value):
+    s = xml_norm_text(value)
+    if not s:
+        return ""
+
+    s = s.strip()
+
+    # Format: 20260515
+    if re.fullmatch(r"\d{8}", s):
+        return f"{s[0:4]}-{s[4:6]}-{s[6:8]}"
+
+    # Format: 2026-05-15
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
+        return s
+
+    # Format: 15.05.2026
+    m = re.fullmatch(r"(\d{2})\.(\d{2})\.(\d{4})", s)
+    if m:
+        return f"{m.group(3)}-{m.group(2)}-{m.group(1)}"
+
+    # Falls Datum + Uhrzeit kommt, Datumsteil holen
+    m = re.search(r"\b(\d{4})(\d{2})(\d{2})\b", s)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+
+    return s
+
 def xml_parse_root(xml_text):
     try:
         return ET.fromstring(xml_text.encode("utf-8"))
@@ -1982,7 +2009,8 @@ def xml_parse_cii(root):
             "dokumenttyp": dokumenttyp,
             "dokumenttyp_code": type_code,
             "rechnungsnummer": document_id,
-            "rechnungsdatum": issue_date,
+            "rechnungsdatum": xml_normalize_date(issue_date),
+            "rechnungsdatum_raw": issue_date,
             "waehrung": currency,
             "sprache": "",
             "lieferant": supplier,
@@ -2137,7 +2165,8 @@ def xml_parse_ubl(root):
             "dokumenttyp": dokumenttyp,
             "dokumenttyp_code": type_code,
             "rechnungsnummer": document_id,
-            "rechnungsdatum": issue_date,
+            "rechnungsdatum": xml_normalize_date(issue_date),
+            "rechnungsdatum_raw": issue_date,
             "waehrung": currency,
             "sprache": "",
             "lieferant": supplier,
