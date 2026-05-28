@@ -1799,6 +1799,62 @@ def xml_extract_totals(root):
         "brutto_rohwerte": gross_values
     }
 
+def xml_clean_candidate(value):
+    s = xml_norm_text(value)
+
+    if not s:
+        return ""
+
+    bad_contains = [
+        "urn:",
+        "schema",
+        "peppol",
+        "en16931",
+        "xrechnung",
+        "zugferd",
+        "factur-x",
+        "iso",
+        "rsm:",
+        "ram:",
+        "udt:",
+        "qdt:",
+        "http://",
+        "https://",
+    ]
+
+    ls = s.lower()
+
+    if any(x in ls for x in bad_contains):
+        return ""
+
+    if len(s) > 180:
+        return ""
+
+    if s in ["Größe", "Farbe", "Paketgröße:", "netto", "Gesamtpreis", "Artikel", "Summe"]:
+        return ""
+
+    return s
+
+
+def add_candidate(target, value, quelle="", label=""):
+    value = xml_clean_candidate(value)
+
+    if not value:
+        return
+
+    item = {
+        "wert": value,
+        "quelle": quelle,
+        "label": label
+    }
+
+    for existing in target:
+        if existing.get("wert") == value:
+            return
+
+    target.append(item)
+
+
 def xml_extract_references(root, pdf_text_full=""):
     refs = {
         "kommission_kandidaten": [],
@@ -1807,49 +1863,87 @@ def xml_extract_references(root, pdf_text_full=""):
         "lieferschein_kandidaten": [],
         "bestellnummer_kandidaten": [],
         "referenz_kandidaten": [],
-        "auftrag_kandidaten": []
+        "auftrag_kandidaten": [],
+        "gutschrift_referenz_kandidaten": [],
     }
 
-    buyer_ref = xml_first_text(root, ["BuyerReference"])
-    order_refs = xml_all_texts(root, ["OrderReference", "BuyerOrderReferencedDocument", "PurchaseOrderReference", "IssuerAssignedID"])
-    doc_refs = xml_all_texts(root, ["DespatchAdviceReferencedDocument", "DeliveryNoteReferencedDocument", "AdditionalReferencedDocument", "ReferencedDocument", "ID"])
+    # --------------------------------------------------------
+    # 1) XML: klare Referenzfelder
+    # --------------------------------------------------------
+
+    buyer_refs = xml_all_texts(root, ["BuyerReference"])
+    order_refs = xml_all_texts(root, ["OrderReference", "BuyerOrderReferencedDocument", "PurchaseOrderReference"])
+    issuer_ids = xml_all_texts(root, ["IssuerAssignedID"])
+    delivery_refs = xml_all_texts(root, ["DespatchAdviceReferencedDocument", "DeliveryNoteReferencedDocument"])
+    billing_refs = xml_all_texts(root, ["BillingReference", "InvoiceDocumentReference"])
+
+    for v in buyer_refs:
+        add_candidate(refs["kommission_kandidaten"], v, "xml", "BuyerReference")
+        add_candidate(refs["referenz_kandidaten"], v, "xml", "BuyerReference")
+
+        # Kostenstellenmuster grob erkennen
+        if re.fullmatch(r"[A-Z]{0,4}P?\d{4,10}", str(v).replace(" ", ""), re.IGNORECASE):
+            add_candidate(refs["kostenstelle_kandidaten"], v, "xml", "BuyerReference")
+
+    for v in order_refs + issuer_ids:
+        add_candidate(refs["bestellnummer_kandidaten"], v, "xml", "OrderReference/IssuerAssignedID")
+        add_candidate(refs["auftrag_kandidaten"], v, "xml", "OrderReference/IssuerAssignedID")
+
+    for v in delivery_refs:
+        add_candidate(refs["lieferschein_kandidaten"], v, "xml", "DeliveryNoteReference")
+
+    for v in billing_refs:
+        add_candidate(refs["gutschrift_referenz_kandidaten"], v, "xml", "BillingReference")
+        add_candidate(refs["referenz_kandidaten"], v, "xml", "BillingReference")
+
+    # --------------------------------------------------------
+    # 2) XML: Lieferadresse / ShipTo als Baustellenkandidat
+    # --------------------------------------------------------
+
+    delivery = xml_extract_delivery(root)
+    delivery_text = delivery.get("adresse_text", "")
+
+    if delivery_text:
+        add_candidate(refs["baustelle_kandidaten"], delivery_text, "xml", "Lieferadresse/ShipTo")
+
+    # --------------------------------------------------------
+    # 3) XML: Notizen nur gezielt verwenden
+    # Nicht mehr jede Note als Kommission!
+    # --------------------------------------------------------
+
     notes = xml_all_texts(root, ["IncludedNote", "Note", "Content", "Description"])
 
-    for v in [buyer_ref] + notes:
-        if v and v not in refs["kommission_kandidaten"]:
-            refs["kommission_kandidaten"].append(v)
+    for note in notes:
+        n = xml_clean_candidate(note)
+        if not n:
+            continue
 
-    for v in order_refs:
-        if v and v not in refs["bestellnummer_kandidaten"]:
-            refs["bestellnummer_kandidaten"].append(v)
+        ln = n.lower()
 
-    for v in doc_refs:
-        lv = lower(v)
-        if v and any(x in lv for x in ["ls", "lieferschein", "lieferung"]):
-            refs["lieferschein_kandidaten"].append(v)
-        elif v and v not in refs["referenz_kandidaten"]:
-            refs["referenz_kandidaten"].append(v)
+        if any(x in ln for x in ["kommission", "auftr.text", "auftragstext", "projekt", "baustelle", "kostenstelle", "kundenvorgang"]):
+            add_candidate(refs["referenz_kandidaten"], n, "xml_note", "Projekt-/Referenznotiz")
 
-    # PDF-Fallback für sichtbare Lieferschein-/Auftrags-/Referenzfelder
-    pdf = pdf_text_full or ""
-    patterns = [
-        ("lieferschein_kandidaten", r"(?:Lieferschein|Lieferschein-Nr\.?|Lieferscheinnummer|Web-Lieferschein|LS\.?-?Nr\.?)[:\s]*([A-Z0-9\-\/]+)"),
-        ("auftrag_kandidaten", r"(?:Auftrag|Auftragsnummer|AUFTR\.NR\.?|Unser Auftrag)[:\s]*([A-Z0-9\-\/]+)"),
-        ("kostenstelle_kandidaten", r"\b(P\d{4,8}|[A-Z]{1,4}\d{4,10})\b"),
-        ("referenz_kandidaten", r"(?:Ihre Referenz|Bestellangaben|Ihr Auftrag|KD-Bestell-Nr\.?)[:\s]*([A-Za-zÄÖÜäöüß0-9 \-\/#]+)")
-    ]
+            # gezielte Extraktion aus Text
+            m = re.search(r"(?:kommission|auftr\.text|auftragstext)\s*[:\-]?\s*([A-Za-zÄÖÜäöüß0-9 \-\/\.]+)", n, re.IGNORECASE)
+            if m:
+                add_candidate(refs["kommission_kandidaten"], m.group(1), "xml_note", "Kommission/AUFTR.TEXT")
 
-    for key, pat in patterns:
-        for m in re.finditer(pat, pdf, flags=re.IGNORECASE):
-            val = xml_norm_text(m.group(1))
-            if val and val not in refs[key]:
-                refs[key].append(val)
+            m = re.search(r"(?:kostenstelle|auftr\.nr|projekt[- ]?nr\.?)\s*[:\-]?\s*([A-Z0-9\-\/\.]+)", n, re.IGNORECASE)
+            if m:
+                add_candidate(refs["kostenstelle_kandidaten"], m.group(1), "xml_note", "Kostenstelle/AUFTR.NR")
 
-    # Baustellen-Kandidaten aus sichtbaren Adressmustern
-    for m in re.finditer(r"([A-ZÄÖÜ][A-Za-zÄÖÜäöüß\- ]+,\s*)?([A-Za-zÄÖÜäöüß\- ]+(?:str\.?|straße|strasse|weg|allee|platz|gasse|ring|trift|repsch|kasselfeld)\s+\d+[a-zA-Z]?,?\s*\d{5}\s+[A-Za-zÄÖÜäöüß\- ]+)", pdf, flags=re.IGNORECASE):
-        val = xml_norm_text(m.group(0))
-        if val and val not in refs["baustelle_kandidaten"]:
-            refs["baustelle_kandidaten"].append(val)
+            m = re.search(r"(?:lieferschein|ls[- ]?nr\.?|delivery note)\s*[:\-]?\s*([A-Z0-9\-\/\.]+)", n, re.IGNORECASE)
+            if m:
+                add_candidate(refs["lieferschein_kandidaten"], m.group(1), "xml_note", "Lieferschein")
+
+            m = re.search(r"(?:gutschrift zu rechnung|referenzrechnung|rechnung)\s*[:\-]?\s*([A-Z0-9\-\/\.]+)", n, re.IGNORECASE)
+            if m:
+                add_candidate(refs["gutschrift_referenz_kandidaten"], m.group(1), "xml_note", "Gutschriftbezug")
+
+    # --------------------------------------------------------
+    # 4) PDF-Text bewusst NICHT nutzen, wenn leer übergeben
+    # Optional später. Aktuell bleibt GPT für PDF-Sichtprüfung zuständig.
+    # --------------------------------------------------------
 
     return refs
 
@@ -1863,23 +1957,39 @@ def xml_extract_positions(root):
     positions = []
 
     for idx, node in enumerate(position_nodes, start=1):
-        pos_nr = xml_child_first_text(node, ["LineID", "ID", "AssociatedDocumentLineDocument"])
+        pos_nr = xml_child_first_text(node, ["LineID", "ID"])
         description_values = xml_child_all_texts(node, ["Name", "Description"])
-        description = " ".join([x for x in description_values if x])
+        description = " ".join([x for x in description_values if x]).strip()
 
         qty = xml_child_first_text(node, ["BilledQuantity", "InvoicedQuantity", "CreditedQuantity", "Quantity"])
+
         unit = ""
         for el in node.iter():
             if xml_local_name(el.tag) in ["BilledQuantity", "InvoicedQuantity", "CreditedQuantity", "Quantity"]:
                 unit = el.attrib.get("unitCode", "") or el.attrib.get("unitCodeListID", "")
                 break
 
-        seller_id = xml_child_first_text(node, ["SellerAssignedID", "SellersItemIdentification"])
-        buyer_id = xml_child_first_text(node, ["BuyerAssignedID", "BuyersItemIdentification"])
-        global_id = xml_child_first_text(node, ["GlobalID", "StandardItemIdentification"])
-        manufacturer_id = xml_child_first_text(node, ["ManufacturerAssignedID", "ManufacturerItemIdentification"])
+        # --------------------------------------------------------
+        # Artikelnummern / IDs
+        # --------------------------------------------------------
 
-        all_ids = xml_child_all_texts(node, ["ID", "GlobalID", "SellerAssignedID", "BuyerAssignedID", "ManufacturerAssignedID"])
+        seller_id = xml_child_first_text(node, ["SellerAssignedID"])
+        buyer_id = xml_child_first_text(node, ["BuyerAssignedID"])
+        global_id = xml_child_first_text(node, ["GlobalID"])
+        manufacturer_id = xml_child_first_text(node, ["ManufacturerAssignedID"])
+
+        all_ids = xml_child_all_texts(node, [
+            "SellerAssignedID",
+            "BuyerAssignedID",
+            "GlobalID",
+            "ManufacturerAssignedID"
+        ])
+
+        # Fallback: alle ID-Felder innerhalb Position sammeln, aber technische IDs filtern
+        for val in xml_child_all_texts(node, ["ID"]):
+            clean = xml_clean_candidate(val)
+            if clean and clean not in all_ids:
+                all_ids.append(clean)
 
         ean_candidates = []
         for val in all_ids + [global_id]:
@@ -1887,43 +1997,92 @@ def xml_extract_positions(root):
             if len(digits) in [8, 12, 13, 14] and digits not in ean_candidates:
                 ean_candidates.append(digits)
 
-        gross_price = xml_child_first_text(node, ["ChargeAmount", "BasisPriceAmount", "GrossPriceProductTradePrice", "PriceAmount"])
-        net_price = xml_child_first_text(node, ["NetPriceProductTradePrice", "PriceAmount", "ChargeAmount"])
+        # --------------------------------------------------------
+        # Preise
+        # Wichtig:
+        # line_total = Positionswert netto
+        # net_price = möglichst rabattierter Einzelpreis netto
+        # gross_price/listenpreis = wenn vorhanden
+        # --------------------------------------------------------
+
         line_total = xml_child_first_text(node, ["LineTotalAmount", "LineExtensionAmount"])
+
+        price_amounts = []
+        for el in node.iter():
+            if xml_local_name(el.tag) in ["ChargeAmount", "PriceAmount", "BasisPriceAmount"]:
+                txt = xml_norm_text(el.text)
+                if txt:
+                    price_amounts.append(txt)
+
+        # Standardlogik:
+        # meistens letzter/kleinster sinnvoller Preis = Netto-/Rabattpreis,
+        # erster größerer Preis oft Listenpreis.
+        numeric_prices = [xml_to_float(x) for x in price_amounts]
+        numeric_prices = [x for x in numeric_prices if x is not None]
+
+        gross_price = numeric_prices[0] if numeric_prices else None
+        net_price = numeric_prices[-1] if numeric_prices else None
+
+        # Wenn Menge und Positionswert vorhanden, besseren Einzelpreis berechnen
+        menge_float = xml_to_float(qty)
+        line_float = xml_to_float(line_total)
+
+        if menge_float not in [None, 0] and line_float is not None:
+            calculated_unit = round(line_float / menge_float, 6)
+            # Dieser Wert ist für Preisprüfung meist der beste Wert
+            net_price = calculated_unit
+
         tax_rate = xml_child_first_text(node, ["RateApplicablePercent", "Percent"])
 
-        delivery_ref = ""
-        for val in xml_child_all_texts(node, ["IssuerAssignedID", "LineID", "ID"]):
-            if val and re.search(r"\d{5,}", val):
-                delivery_ref = val
-                break
+        # --------------------------------------------------------
+        # Hersteller-/Zusatznummern aus Beschreibung extrahieren
+        # Nur als Kandidaten, nicht hart als Herstellernummer setzen
+        # --------------------------------------------------------
+
+        nummern_aus_text = []
+        for m in re.finditer(r"\b[A-Z0-9][A-Z0-9\-\/\.]{4,}\b", description):
+            val = m.group(0).strip()
+            if val and val not in nummern_aus_text and val not in all_ids:
+                nummern_aus_text.append(val)
 
         positions.append({
             "positionsnummer": pos_nr or str(idx),
             "beschreibung": description,
-            "menge": xml_to_float(qty),
+            "menge": menge_float,
             "einheit": unit,
-            "einzelpreis_netto": xml_to_float(net_price),
-            "listenpreis_netto": xml_to_float(gross_price),
-            "gesamtpreis_netto": xml_to_float(line_total),
+
+            "einzelpreis_netto": net_price,
+            "listenpreis_netto": gross_price,
+            "gesamtpreis_netto": line_float,
             "mwst_satz": xml_to_float(tax_rate),
+
             "lieferanten_artikelnummer": seller_id,
             "kunden_artikelnummer": buyer_id,
+
             "ean": ean_candidates[0] if ean_candidates else "",
             "ean_kandidaten": ean_candidates,
+
             "herstellernummer": manufacturer_id,
+            "herstellernummer_kandidaten": nummern_aus_text,
+
             "artikelnummer_kandidaten": {
                 "seller_assigned_id": seller_id,
                 "buyer_assigned_id": buyer_id,
                 "global_id": global_id,
                 "manufacturer_id": manufacturer_id,
-                "alle_ids": all_ids
+                "alle_ids": all_ids,
+                "nummern_aus_beschreibung": nummern_aus_text
             },
-            "lieferscheinnummer": delivery_ref,
+
+            # Nicht mehr blind aus irgendeiner ID ableiten.
+            # Lieferschein kommt über xml_kandidaten oder GPT aus PDF.
+            "lieferscheinnummer": "",
+
             "raw_position_index": idx
         })
 
     return positions
+
 
 def build_pruefprofil(lieferanten_kategorie):
     kat = str(lieferanten_kategorie or "").strip().upper()
