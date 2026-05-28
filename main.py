@@ -1482,9 +1482,10 @@ def extract_pdf():
                 "ocr_error": None,
             }
         }), 200
+        
 # ============================================================
-# XML / E-RECHNUNG / PRUEFKONTEXT V1
-# Ergänzungsblock für bestehenden /extract Flow
+# XML / E-RECHNUNG / PRUEFKONTEXT V2
+# Standard-Parser für CII / Factur-X / ZUGFeRD / XRechnung / UBL
 # ============================================================
 
 import json
@@ -1518,7 +1519,7 @@ def xml_to_float(value):
         s = s.replace(".", "").replace(",", ".")
     elif "," in s:
         s = s.replace(",", ".")
-    s = re.sub(r"[^0-9\.\-]", "", s)
+    s = re.sub(r"[^0-9.\-]", "", s)
     if not s or s in ("-", ".", "-."):
         return None
     try:
@@ -1535,80 +1536,117 @@ def xml_parse_root(xml_text):
         except Exception:
             return None
 
-def xml_find_all(root, local_names):
-    if root is None:
-        return []
-    wanted = {str(x).lower() for x in local_names}
-    return [el for el in root.iter() if xml_local_name(el.tag).lower() in wanted]
+def xml_direct_child(node, child_name):
+    if node is None:
+        return None
+    for child in list(node):
+        if xml_local_name(child.tag) == child_name:
+            return child
+    return None
 
-def xml_first_text(root, local_names):
-    for el in xml_find_all(root, local_names):
-        txt = xml_norm_text(el.text)
-        if txt:
-            return txt
+def xml_descendants(node, name):
+    if node is None:
+        return []
+    return [x for x in node.iter() if xml_local_name(x.tag) == name]
+
+def xml_first_descendant(node, name):
+    items = xml_descendants(node, name)
+    return items[0] if items else None
+
+def xml_text(node):
+    return xml_norm_text(node.text) if node is not None else ""
+
+def xml_find_path_from(node, path):
+    current = node
+    for part in path:
+        current = xml_direct_child(current, part)
+        if current is None:
+            return None
+    return current
+
+def xml_find_descendant_path(root, path):
+    if root is None or not path:
+        return None
+    first = path[0]
+    for node in root.iter():
+        if xml_local_name(node.tag) != first:
+            continue
+        current = node
+        ok = True
+        for part in path[1:]:
+            current = xml_direct_child(current, part)
+            if current is None:
+                ok = False
+                break
+        if ok:
+            return current
+    return None
+
+def xml_text_path(root, path):
+    return xml_text(xml_find_descendant_path(root, path))
+
+def xml_first_text_path(root, paths):
+    for path in paths:
+        value = xml_text_path(root, path)
+        if value:
+            return value
     return ""
 
-def xml_all_texts(root, local_names):
+def xml_all_texts_path(root, path):
     out = []
-    for el in xml_find_all(root, local_names):
-        txt = xml_norm_text(el.text)
-        if txt and txt not in out:
-            out.append(txt)
+    if root is None or not path:
+        return out
+    first = path[0]
+    for node in root.iter():
+        if xml_local_name(node.tag) != first:
+            continue
+        current = node
+        ok = True
+        for part in path[1:]:
+            current = xml_direct_child(current, part)
+            if current is None:
+                ok = False
+                break
+        if ok:
+            value = xml_text(current)
+            if value and value not in out:
+                out.append(value)
     return out
 
-def xml_child_first_text(node, local_names):
-    if node is None:
+def xml_clean_candidate(value):
+    s = xml_norm_text(value)
+    if not s:
         return ""
-    wanted = {str(x).lower() for x in local_names}
-    for el in node.iter():
-        if xml_local_name(el.tag).lower() in wanted:
-            txt = xml_norm_text(el.text)
-            if txt:
-                return txt
-    return ""
 
-def xml_child_all_texts(node, local_names):
-    if node is None:
-        return []
-    wanted = {str(x).lower() for x in local_names}
-    out = []
-    for el in node.iter():
-        if xml_local_name(el.tag).lower() in wanted:
-            txt = xml_norm_text(el.text)
-            if txt and txt not in out:
-                out.append(txt)
-    return out
+    bad_exact = {
+        "OISo", "ISO", "Größe", "Farbe", "Paketgröße:",
+        "netto", "Gesamtpreis", "Artikel", "Summe"
+    }
+    if s in bad_exact:
+        return ""
 
-def xml_detect_format(xml_text, filename=""):
-    t = lower(xml_text)
-    f = lower(filename)
+    ls = s.lower()
+    bad_contains = [
+        "urn:", "schema", "peppol", "en16931", "xrechnung",
+        "zugferd", "factur-x", "rsm:", "ram:", "udt:", "qdt:",
+        "http://", "https://"
+    ]
+    if any(x in ls for x in bad_contains):
+        return ""
 
-    fmt = "UNBEKANNT"
-    profil = "UNBEKANNT"
+    if len(s) > 220:
+        return ""
 
-    if "crossindustryinvoice" in t:
-        fmt = "CII"
-    if "crossindustrydocument" in t:
-        fmt = "ZUGFERD"
-    if "urn:oasis:names:specification:ubl" in t or "<invoice" in t and "ubl" in t:
-        fmt = "UBL"
-    if "xrechnung" in t or "leitweg" in t:
-        fmt = "XRECHNUNG"
-    if "factur-x" in t or "factur-x" in f:
-        fmt = "FACTUR_X"
-    if "zugferd" in t or "zugferd" in f:
-        fmt = "ZUGFERD"
+    return s
 
-    if "basic" in t:
-        profil = "BASIC"
-    if "comfort" in t:
-        profil = "COMFORT"
-    if "en16931" in t or "en 16931" in t:
-        profil = "EN16931"
-    if "extended" in t:
-        profil = "EXTENDED"
-
-    return fmt, profil
+def add_candidate(target, value, quelle="", label=""):
+    value = xml_clean_candidate(value)
+    if not value:
+        return
+    for existing in target:
+        if existing.get("wert") == value:
+            return
+    target.append({"wert": value, "quelle": quelle, "label": label})
 
 def xml_extract_embedded_files_from_pdf(pdf_bytes):
     result = []
@@ -1640,20 +1678,50 @@ def xml_extract_embedded_files_from_pdf(pdf_bytes):
             continue
 
         name_l = name.lower()
-        looks_xml = content[:300].lstrip().startswith(b"<?xml") or content[:300].lstrip().startswith(b"<")
+        start = content[:500].lstrip()
+        looks_xml = start.startswith(b"<?xml") or start.startswith(b"<")
         is_xml_name = name_l.endswith(".xml") or any(x in name_l for x in ["zugferd", "factur", "xrechnung", "invoice", "ubl"])
 
         if is_xml_name or looks_xml:
-            xml_text = xml_decode_bytes(content)
             result.append({
                 "dateiname": name,
-                "xml_text": xml_text,
+                "xml_text": xml_decode_bytes(content),
                 "bytes": len(content)
             })
 
     return result, ""
 
-def xml_build_feldinventar(root, max_items=1200):
+def xml_detect_format(root, xml_text="", filename=""):
+    full = (xml_text or "")[:5000].lower() + " " + (filename or "").lower()
+    root_name = xml_local_name(root.tag) if root is not None else ""
+
+    if root_name in ["CrossIndustryInvoice", "CrossIndustryDocument"] or "crossindustryinvoice" in full:
+        fmt = "CII"
+    elif root_name in ["Invoice", "CreditNote"] and "oasis" in full:
+        fmt = "UBL"
+    elif "xrechnung" in full:
+        fmt = "XRECHNUNG"
+    else:
+        fmt = "UNBEKANNT"
+
+    if "factur-x" in full:
+        fmt = "FACTUR_X"
+    if "zugferd" in full:
+        fmt = "ZUGFERD"
+
+    profil = "UNBEKANNT"
+    if "extended" in full:
+        profil = "EXTENDED"
+    elif "en16931" in full or "en 16931" in full:
+        profil = "EN16931"
+    elif "comfort" in full:
+        profil = "COMFORT"
+    elif "basic" in full:
+        profil = "BASIC"
+
+    return fmt, profil
+
+def xml_build_feldinventar(root, max_items=2000):
     inventar = []
     if root is None:
         return inventar
@@ -1661,201 +1729,136 @@ def xml_build_feldinventar(root, max_items=1200):
     def walk(node, path):
         if len(inventar) >= max_items:
             return
-
         name = xml_local_name(node.tag)
         current_path = f"{path}.{name}" if path else name
-        text = xml_norm_text(node.text)
-
-        if text:
+        value = xml_norm_text(node.text)
+        if value:
             inventar.append({
                 "pfad": current_path,
                 "feld": name,
-                "wert": text,
+                "wert": value,
                 "attribute": dict(node.attrib or {})
             })
-
         for child in list(node):
             walk(child, current_path)
 
     walk(root, "")
     return inventar
 
-def xml_guess_dokumenttyp(root):
-    # Normale E-Rechnung Codes:
-    # 380 = Rechnung, 381 = Gutschrift, 384 = Korrekturrechnung
-    type_code = xml_first_text(root, ["TypeCode", "InvoiceTypeCode", "CreditNoteTypeCode"])
-    type_code_clean = str(type_code or "").strip()
+def xml_party_from_node(party):
+    if party is None:
+        return {"name": "", "adresse": "", "strasse": "", "plz": "", "ort": "", "land": "", "ust_id": "", "kundennummer": ""}
 
-    if type_code_clean == "380":
-        return "RECHNUNG"
-    if type_code_clean == "381":
-        return "GUTSCHRIFT"
-    if type_code_clean == "384":
-        return "RECHNUNGSKORREKTUR"
+    name = xml_first_text_path(party, [
+        ["Name"],
+        ["PartyName", "Name"],
+        ["SpecifiedLegalOrganization", "TradingBusinessName"]
+    ])
 
-    text = " ".join(xml_all_texts(root, ["Name", "IncludedNote", "Content", "Description"]))
-    lt = lower(text)
+    street = xml_first_text_path(party, [
+        ["PostalTradeAddress", "LineOne"],
+        ["PostalTradeAddress", "StreetName"],
+        ["PostalAddress", "StreetName"],
+        ["PostalAddress", "AddressLine", "Line"]
+    ])
 
-    if "gutschrift" in lt:
-        return "GUTSCHRIFT"
-    if "rechnung" in lt:
-        return "RECHNUNG"
+    plz = xml_first_text_path(party, [
+        ["PostalTradeAddress", "PostcodeCode"],
+        ["PostalAddress", "PostalZone"]
+    ])
 
-    return "UNBEKANNT"
+    ort = xml_first_text_path(party, [
+        ["PostalTradeAddress", "CityName"],
+        ["PostalAddress", "CityName"],
+        ["PostalAddress", "City"]
+    ])
 
-def xml_extract_party(root, party_names):
-    nodes = xml_find_all(root, party_names)
-    if not nodes:
-        return {"name": "", "adresse": "", "plz": "", "ort": "", "land": "", "ust_id": "", "kundennummer": ""}
+    land = xml_first_text_path(party, [
+        ["PostalTradeAddress", "CountryID"],
+        ["PostalAddress", "Country", "IdentificationCode"],
+        ["Country", "IdentificationCode"]
+    ])
 
-    node = nodes[0]
-    name = xml_child_first_text(node, ["Name", "RegistrationName"])
-    post_code = xml_child_first_text(node, ["PostcodeCode", "PostalZone"])
-    city = xml_child_first_text(node, ["CityName", "City"])
-    country = xml_child_first_text(node, ["CountryID", "IdentificationCode"])
-    street = xml_child_first_text(node, ["LineOne", "StreetName"])
-    ust_id = xml_child_first_text(node, ["ID", "CompanyID"])
-    kundennummer = xml_child_first_text(node, ["GlobalID", "AssignedID"])
+    ust_id = xml_first_text_path(party, [
+        ["SpecifiedTaxRegistration", "ID"],
+        ["PartyTaxScheme", "CompanyID"]
+    ])
 
-    adresse_parts = [street, post_code, city, country]
-    adresse = ", ".join([x for x in adresse_parts if x])
+    kundennummer = xml_first_text_path(party, [
+        ["ID"],
+        ["GlobalID"],
+        ["EndpointID"]
+    ])
+
+    adresse = ", ".join([x for x in [street, plz, ort, land] if x])
 
     return {
         "name": name,
         "adresse": adresse,
         "strasse": street,
-        "plz": post_code,
-        "ort": city,
-        "land": country,
+        "plz": plz,
+        "ort": ort,
+        "land": land,
         "ust_id": ust_id,
         "kundennummer": kundennummer
     }
 
-def xml_extract_delivery(root):
-    nodes = xml_find_all(root, [
-        "ShipToTradeParty",
-        "Delivery",
-        "ActualDeliverySupplyChainEvent",
-        "DeliveryParty",
-        "DeliveryCustomerParty"
+def xml_parse_cii(root):
+    document_id = xml_first_text_path(root, [
+        ["ExchangedDocument", "ID"],
+        ["HeaderExchangedDocument", "ID"]
     ])
 
-    texts = []
-    for node in nodes:
-        for value in xml_child_all_texts(node, ["Name", "LineOne", "StreetName", "PostcodeCode", "CityName", "CountryID", "PostalZone", "City"]):
-            if value not in texts:
-                texts.append(value)
+    type_code = xml_first_text_path(root, [
+        ["ExchangedDocument", "TypeCode"],
+        ["HeaderExchangedDocument", "TypeCode"]
+    ])
 
-    return {
-        "name": texts[0] if texts else "",
-        "adresse_text": ", ".join(texts),
-        "rohwerte": texts
+    issue_date = xml_first_text_path(root, [
+        ["ExchangedDocument", "IssueDateTime", "DateTimeString"],
+        ["HeaderExchangedDocument", "IssueDateTime", "DateTimeString"]
+    ])
+
+    currency = xml_first_text_path(root, [
+        ["ApplicableHeaderTradeSettlement", "InvoiceCurrencyCode"]
+    ])
+
+    supplier_node = xml_find_descendant_path(root, ["ApplicableHeaderTradeAgreement", "SellerTradeParty"])
+    customer_node = xml_find_descendant_path(root, ["ApplicableHeaderTradeAgreement", "BuyerTradeParty"])
+    delivery_node = xml_find_descendant_path(root, ["ApplicableHeaderTradeDelivery", "ShipToTradeParty"])
+
+    supplier = xml_party_from_node(supplier_node)
+    customer = xml_party_from_node(customer_node)
+    delivery_party = xml_party_from_node(delivery_node)
+    delivery = {
+        "name": delivery_party.get("name", ""),
+        "adresse_text": delivery_party.get("adresse", ""),
+        "strasse": delivery_party.get("strasse", ""),
+        "plz": delivery_party.get("plz", ""),
+        "ort": delivery_party.get("ort", ""),
+        "land": delivery_party.get("land", ""),
+        "rohwerte": [x for x in [delivery_party.get("name"), delivery_party.get("strasse"), delivery_party.get("plz"), delivery_party.get("ort"), delivery_party.get("land")] if x]
     }
 
-def xml_extract_payment(root):
-    payment_terms = " | ".join(xml_all_texts(root, ["Description", "PaymentTerms", "Note"]))
-    due_date = xml_first_text(root, ["DueDateDateTime", "DueDate", "DateTimeString"])
-
-    skonto_betrag = ""
-    skonto_prozent = ""
-    skonto_datum = ""
-
-    m_percent = re.search(r"(\d{1,2}(?:[,.]\d{1,2})?)\s*%.*?skonto", payment_terms, re.IGNORECASE)
-    if m_percent:
-        skonto_prozent = m_percent.group(1).replace(",", ".")
-
-    m_amount = re.search(r"skonto.*?(\d{1,3}(?:\.\d{3})*,\d{2}|\d+\.\d{2})", payment_terms, re.IGNORECASE)
-    if m_amount:
-        skonto_betrag = m_amount.group(1)
-
-    m_date = re.search(r"\b\d{2}\.\d{2}\.\d{4}\b|\b\d{4}-\d{2}-\d{2}\b", payment_terms)
-    if m_date:
-        skonto_datum = m_date.group(0)
-
-    return {
-        "zahlungsziel_datum": due_date,
-        "zahlungsbedingungen_text": payment_terms,
-        "skonto_prozent": skonto_prozent,
-        "skonto_betrag": skonto_betrag,
-        "skonto_datum": skonto_datum
+    total_node = xml_find_descendant_path(root, ["SpecifiedTradeSettlementHeaderMonetarySummation"])
+    totals = {
+        "gesamt_netto": xml_to_float(xml_first_text_path(total_node, [["TaxBasisTotalAmount"], ["LineTotalAmount"]])),
+        "gesamt_mwst": xml_to_float(xml_first_text_path(total_node, [["TaxTotalAmount"]])),
+        "gesamt_brutto": xml_to_float(xml_first_text_path(total_node, [["GrandTotalAmount"], ["DuePayableAmount"]])),
+        "netto_rohwerte": xml_all_texts_path(total_node, ["TaxBasisTotalAmount"]) if total_node is not None else [],
+        "mwst_rohwerte": xml_all_texts_path(total_node, ["TaxTotalAmount"]) if total_node is not None else [],
+        "brutto_rohwerte": xml_all_texts_path(total_node, ["GrandTotalAmount"]) if total_node is not None else []
     }
 
-def xml_extract_totals(root):
-    netto_values = xml_all_texts(root, ["TaxBasisTotalAmount", "LineTotalAmount", "TaxExclusiveAmount", "BasisAmount"])
-    tax_values = xml_all_texts(root, ["TaxTotalAmount", "CalculatedAmount", "TaxAmount"])
-    gross_values = xml_all_texts(root, ["GrandTotalAmount", "TaxInclusiveAmount", "DuePayableAmount", "PayableAmount"])
-
-    def last_float(values):
-        nums = [xml_to_float(x) for x in values]
-        nums = [x for x in nums if x is not None]
-        return nums[-1] if nums else None
-
-    return {
-        "gesamt_netto": last_float(netto_values),
-        "gesamt_mwst": last_float(tax_values),
-        "gesamt_brutto": last_float(gross_values),
-        "netto_rohwerte": netto_values,
-        "mwst_rohwerte": tax_values,
-        "brutto_rohwerte": gross_values
+    terms = xml_all_texts_path(root, ["SpecifiedTradePaymentTerms", "Description"])
+    zahlung = {
+        "zahlungsziel_datum": xml_first_text_path(root, [["SpecifiedTradePaymentTerms", "DueDateDateTime", "DateTimeString"]]),
+        "zahlungsbedingungen_text": " | ".join(terms),
+        "skonto_prozent": "",
+        "skonto_betrag": "",
+        "skonto_datum": ""
     }
 
-def xml_clean_candidate(value):
-    s = xml_norm_text(value)
-
-    if not s:
-        return ""
-
-    bad_contains = [
-        "urn:",
-        "schema",
-        "peppol",
-        "en16931",
-        "xrechnung",
-        "zugferd",
-        "factur-x",
-        "iso",
-        "rsm:",
-        "ram:",
-        "udt:",
-        "qdt:",
-        "http://",
-        "https://",
-    ]
-
-    ls = s.lower()
-
-    if any(x in ls for x in bad_contains):
-        return ""
-
-    if len(s) > 180:
-        return ""
-
-    if s in ["Größe", "Farbe", "Paketgröße:", "netto", "Gesamtpreis", "Artikel", "Summe"]:
-        return ""
-
-    return s
-
-
-def add_candidate(target, value, quelle="", label=""):
-    value = xml_clean_candidate(value)
-
-    if not value:
-        return
-
-    item = {
-        "wert": value,
-        "quelle": quelle,
-        "label": label
-    }
-
-    for existing in target:
-        if existing.get("wert") == value:
-            return
-
-    target.append(item)
-
-
-def xml_extract_references(root, pdf_text_full=""):
     refs = {
         "kommission_kandidaten": [],
         "kostenstelle_kandidaten": [],
@@ -1867,181 +1870,74 @@ def xml_extract_references(root, pdf_text_full=""):
         "gutschrift_referenz_kandidaten": [],
     }
 
-    # --------------------------------------------------------
-    # 1) XML: klare Referenzfelder
-    # --------------------------------------------------------
+    buyer_reference = xml_first_text_path(root, [["ApplicableHeaderTradeAgreement", "BuyerReference"]])
+    if buyer_reference:
+        add_candidate(refs["kommission_kandidaten"], buyer_reference, "xml_cii", "BuyerReference")
+        add_candidate(refs["referenz_kandidaten"], buyer_reference, "xml_cii", "BuyerReference")
+        if re.fullmatch(r"[A-Z]{0,4}P?\d{4,10}", buyer_reference.replace(" ", ""), re.IGNORECASE):
+            add_candidate(refs["kostenstelle_kandidaten"], buyer_reference, "xml_cii", "BuyerReference")
 
-    buyer_refs = xml_all_texts(root, ["BuyerReference"])
-    order_refs = xml_all_texts(root, ["OrderReference", "BuyerOrderReferencedDocument", "PurchaseOrderReference"])
-    issuer_ids = xml_all_texts(root, ["IssuerAssignedID"])
-    delivery_refs = xml_all_texts(root, ["DespatchAdviceReferencedDocument", "DeliveryNoteReferencedDocument"])
-    billing_refs = xml_all_texts(root, ["BillingReference", "InvoiceDocumentReference"])
+    order_ref = xml_first_text_path(root, [["ApplicableHeaderTradeAgreement", "BuyerOrderReferencedDocument", "IssuerAssignedID"]])
+    if order_ref:
+        add_candidate(refs["bestellnummer_kandidaten"], order_ref, "xml_cii", "BuyerOrderReferencedDocument")
+        add_candidate(refs["auftrag_kandidaten"], order_ref, "xml_cii", "BuyerOrderReferencedDocument")
 
-    for v in buyer_refs:
-        add_candidate(refs["kommission_kandidaten"], v, "xml", "BuyerReference")
-        add_candidate(refs["referenz_kandidaten"], v, "xml", "BuyerReference")
-
-        # Kostenstellenmuster grob erkennen
-        if re.fullmatch(r"[A-Z]{0,4}P?\d{4,10}", str(v).replace(" ", ""), re.IGNORECASE):
-            add_candidate(refs["kostenstelle_kandidaten"], v, "xml", "BuyerReference")
-
-    for v in order_refs + issuer_ids:
-        add_candidate(refs["bestellnummer_kandidaten"], v, "xml", "OrderReference/IssuerAssignedID")
-        add_candidate(refs["auftrag_kandidaten"], v, "xml", "OrderReference/IssuerAssignedID")
-
-    for v in delivery_refs:
-        add_candidate(refs["lieferschein_kandidaten"], v, "xml", "DeliveryNoteReference")
-
-    for v in billing_refs:
-        add_candidate(refs["gutschrift_referenz_kandidaten"], v, "xml", "BillingReference")
-        add_candidate(refs["referenz_kandidaten"], v, "xml", "BillingReference")
-
-    # --------------------------------------------------------
-    # 2) XML: Lieferadresse / ShipTo als Baustellenkandidat
-    # --------------------------------------------------------
-
-    delivery = xml_extract_delivery(root)
-    delivery_text = delivery.get("adresse_text", "")
-
-    if delivery_text:
-        add_candidate(refs["baustelle_kandidaten"], delivery_text, "xml", "Lieferadresse/ShipTo")
-
-    # --------------------------------------------------------
-    # 3) XML: Notizen nur gezielt verwenden
-    # Nicht mehr jede Note als Kommission!
-    # --------------------------------------------------------
-
-    notes = xml_all_texts(root, ["IncludedNote", "Note", "Content", "Description"])
-
-    for note in notes:
-        n = xml_clean_candidate(note)
-        if not n:
-            continue
-
-        ln = n.lower()
-
-        if any(x in ln for x in ["kommission", "auftr.text", "auftragstext", "projekt", "baustelle", "kostenstelle", "kundenvorgang"]):
-            add_candidate(refs["referenz_kandidaten"], n, "xml_note", "Projekt-/Referenznotiz")
-
-            # gezielte Extraktion aus Text
-            m = re.search(r"(?:kommission|auftr\.text|auftragstext)\s*[:\-]?\s*([A-Za-zÄÖÜäöüß0-9 \-\/\.]+)", n, re.IGNORECASE)
-            if m:
-                add_candidate(refs["kommission_kandidaten"], m.group(1), "xml_note", "Kommission/AUFTR.TEXT")
-
-            m = re.search(r"(?:kostenstelle|auftr\.nr|projekt[- ]?nr\.?)\s*[:\-]?\s*([A-Z0-9\-\/\.]+)", n, re.IGNORECASE)
-            if m:
-                add_candidate(refs["kostenstelle_kandidaten"], m.group(1), "xml_note", "Kostenstelle/AUFTR.NR")
-
-            m = re.search(r"(?:lieferschein|ls[- ]?nr\.?|delivery note)\s*[:\-]?\s*([A-Z0-9\-\/\.]+)", n, re.IGNORECASE)
-            if m:
-                add_candidate(refs["lieferschein_kandidaten"], m.group(1), "xml_note", "Lieferschein")
-
-            m = re.search(r"(?:gutschrift zu rechnung|referenzrechnung|rechnung)\s*[:\-]?\s*([A-Z0-9\-\/\.]+)", n, re.IGNORECASE)
-            if m:
-                add_candidate(refs["gutschrift_referenz_kandidaten"], m.group(1), "xml_note", "Gutschriftbezug")
-
-    # --------------------------------------------------------
-    # 4) PDF-Text bewusst NICHT nutzen, wenn leer übergeben
-    # Optional später. Aktuell bleibt GPT für PDF-Sichtprüfung zuständig.
-    # --------------------------------------------------------
-
-    return refs
-
-def xml_extract_positions(root):
-    position_nodes = xml_find_all(root, [
-        "IncludedSupplyChainTradeLineItem",
-        "InvoiceLine",
-        "CreditNoteLine"
+    delivery_ref = xml_first_text_path(root, [
+        ["ApplicableHeaderTradeDelivery", "DeliveryNoteReferencedDocument", "IssuerAssignedID"],
+        ["ApplicableHeaderTradeDelivery", "DespatchAdviceReferencedDocument", "IssuerAssignedID"]
     ])
+    if delivery_ref:
+        add_candidate(refs["lieferschein_kandidaten"], delivery_ref, "xml_cii", "DeliveryNoteReferencedDocument")
+
+    invoice_ref = xml_first_text_path(root, [
+        ["ApplicableHeaderTradeSettlement", "InvoiceReferencedDocument", "IssuerAssignedID"],
+        ["BillingReference", "InvoiceDocumentReference", "ID"]
+    ])
+    if invoice_ref:
+        add_candidate(refs["gutschrift_referenz_kandidaten"], invoice_ref, "xml_cii", "InvoiceReferencedDocument")
+        add_candidate(refs["referenz_kandidaten"], invoice_ref, "xml_cii", "InvoiceReferencedDocument")
+
+    if delivery.get("adresse_text"):
+        add_candidate(refs["baustelle_kandidaten"], delivery.get("adresse_text"), "xml_cii", "ShipToTradeParty")
 
     positions = []
+    for idx, node in enumerate(xml_descendants(root, "IncludedSupplyChainTradeLineItem"), start=1):
+        product = xml_first_descendant(node, "SpecifiedTradeProduct")
+        qty_node = xml_find_descendant_path(node, ["SpecifiedLineTradeDelivery", "BilledQuantity"])
 
-    for idx, node in enumerate(position_nodes, start=1):
-        pos_nr = xml_child_first_text(node, ["LineID", "ID"])
-        description_values = xml_child_all_texts(node, ["Name", "Description"])
-        description = " ".join([x for x in description_values if x]).strip()
+        pos_nr = xml_first_text_path(node, [["AssociatedDocumentLineDocument", "LineID"]])
+        seller_id = xml_first_text_path(product, [["SellerAssignedID"]])
+        buyer_id = xml_first_text_path(product, [["BuyerAssignedID"]])
+        global_id = xml_first_text_path(product, [["GlobalID"]])
+        manufacturer_id = xml_first_text_path(product, [["ManufacturerAssignedID"]])
+        name = xml_first_text_path(product, [["Name"]])
+        desc = xml_first_text_path(product, [["Description"]])
+        description = " ".join([x for x in [name, desc] if x]).strip()
 
-        qty = xml_child_first_text(node, ["BilledQuantity", "InvoicedQuantity", "CreditedQuantity", "Quantity"])
+        qty = xml_text(qty_node)
+        unit = qty_node.attrib.get("unitCode", "") if qty_node is not None else ""
 
-        unit = ""
-        for el in node.iter():
-            if xml_local_name(el.tag) in ["BilledQuantity", "InvoicedQuantity", "CreditedQuantity", "Quantity"]:
-                unit = el.attrib.get("unitCode", "") or el.attrib.get("unitCodeListID", "")
-                break
+        line_total = xml_first_text_path(node, [["SpecifiedLineTradeSettlement", "SpecifiedTradeSettlementLineMonetarySummation", "LineTotalAmount"]])
+        net_price = xml_first_text_path(node, [["SpecifiedLineTradeAgreement", "NetPriceProductTradePrice", "ChargeAmount"]])
+        gross_price = xml_first_text_path(node, [["SpecifiedLineTradeAgreement", "GrossPriceProductTradePrice", "ChargeAmount"]])
+        tax_rate = xml_first_text_path(node, [["SpecifiedLineTradeSettlement", "ApplicableTradeTax", "RateApplicablePercent"]])
 
-        # --------------------------------------------------------
-        # Artikelnummern / IDs
-        # --------------------------------------------------------
-
-        seller_id = xml_child_first_text(node, ["SellerAssignedID"])
-        buyer_id = xml_child_first_text(node, ["BuyerAssignedID"])
-        global_id = xml_child_first_text(node, ["GlobalID"])
-        manufacturer_id = xml_child_first_text(node, ["ManufacturerAssignedID"])
-
-        all_ids = xml_child_all_texts(node, [
-            "SellerAssignedID",
-            "BuyerAssignedID",
-            "GlobalID",
-            "ManufacturerAssignedID"
-        ])
-
-        # Fallback: alle ID-Felder innerhalb Position sammeln, aber technische IDs filtern
-        for val in xml_child_all_texts(node, ["ID"]):
-            clean = xml_clean_candidate(val)
-            if clean and clean not in all_ids:
-                all_ids.append(clean)
-
-        ean_candidates = []
-        for val in all_ids + [global_id]:
-            digits = re.sub(r"\D", "", str(val or ""))
-            if len(digits) in [8, 12, 13, 14] and digits not in ean_candidates:
-                ean_candidates.append(digits)
-
-        # --------------------------------------------------------
-        # Preise
-        # Wichtig:
-        # line_total = Positionswert netto
-        # net_price = möglichst rabattierter Einzelpreis netto
-        # gross_price/listenpreis = wenn vorhanden
-        # --------------------------------------------------------
-
-        line_total = xml_child_first_text(node, ["LineTotalAmount", "LineExtensionAmount"])
-
-        price_amounts = []
-        for el in node.iter():
-            if xml_local_name(el.tag) in ["ChargeAmount", "PriceAmount", "BasisPriceAmount"]:
-                txt = xml_norm_text(el.text)
-                if txt:
-                    price_amounts.append(txt)
-
-        # Standardlogik:
-        # meistens letzter/kleinster sinnvoller Preis = Netto-/Rabattpreis,
-        # erster größerer Preis oft Listenpreis.
-        numeric_prices = [xml_to_float(x) for x in price_amounts]
-        numeric_prices = [x for x in numeric_prices if x is not None]
-
-        gross_price = numeric_prices[0] if numeric_prices else None
-        net_price = numeric_prices[-1] if numeric_prices else None
-
-        # Wenn Menge und Positionswert vorhanden, besseren Einzelpreis berechnen
         menge_float = xml_to_float(qty)
         line_float = xml_to_float(line_total)
-
+        net_price_float = xml_to_float(net_price)
         if menge_float not in [None, 0] and line_float is not None:
-            calculated_unit = round(line_float / menge_float, 6)
-            # Dieser Wert ist für Preisprüfung meist der beste Wert
-            net_price = calculated_unit
+            net_price_float = round(line_float / menge_float, 6)
 
-        tax_rate = xml_child_first_text(node, ["RateApplicablePercent", "Percent"])
+        ean_candidates = []
+        digits = re.sub(r"\D", "", global_id or "")
+        if len(digits) in [8, 12, 13, 14]:
+            ean_candidates.append(digits)
 
-        # --------------------------------------------------------
-        # Hersteller-/Zusatznummern aus Beschreibung extrahieren
-        # Nur als Kandidaten, nicht hart als Herstellernummer setzen
-        # --------------------------------------------------------
+        all_ids = [x for x in [seller_id, buyer_id, global_id, manufacturer_id] if xml_clean_candidate(x)]
 
         nummern_aus_text = []
         for m in re.finditer(r"\b[A-Z0-9][A-Z0-9\-\/\.]{4,}\b", description):
-            val = m.group(0).strip()
+            val = xml_clean_candidate(m.group(0))
             if val and val not in nummern_aus_text and val not in all_ids:
                 nummern_aus_text.append(val)
 
@@ -2050,21 +1946,16 @@ def xml_extract_positions(root):
             "beschreibung": description,
             "menge": menge_float,
             "einheit": unit,
-
-            "einzelpreis_netto": net_price,
-            "listenpreis_netto": gross_price,
+            "einzelpreis_netto": net_price_float,
+            "listenpreis_netto": xml_to_float(gross_price),
             "gesamtpreis_netto": line_float,
             "mwst_satz": xml_to_float(tax_rate),
-
             "lieferanten_artikelnummer": seller_id,
             "kunden_artikelnummer": buyer_id,
-
             "ean": ean_candidates[0] if ean_candidates else "",
             "ean_kandidaten": ean_candidates,
-
             "herstellernummer": manufacturer_id,
             "herstellernummer_kandidaten": nummern_aus_text,
-
             "artikelnummer_kandidaten": {
                 "seller_assigned_id": seller_id,
                 "buyer_assigned_id": buyer_id,
@@ -2073,16 +1964,212 @@ def xml_extract_positions(root):
                 "alle_ids": all_ids,
                 "nummern_aus_beschreibung": nummern_aus_text
             },
-
-            # Nicht mehr blind aus irgendeiner ID ableiten.
-            # Lieferschein kommt über xml_kandidaten oder GPT aus PDF.
             "lieferscheinnummer": "",
-
             "raw_position_index": idx
         })
 
-    return positions
+    dokumenttyp = "UNBEKANNT"
+    if type_code == "380":
+        dokumenttyp = "RECHNUNG"
+    elif type_code == "381":
+        dokumenttyp = "GUTSCHRIFT"
+    elif type_code == "384":
+        dokumenttyp = "RECHNUNGSKORREKTUR"
 
+    return {
+        "parser": "CII",
+        "basisdaten": {
+            "dokumenttyp": dokumenttyp,
+            "dokumenttyp_code": type_code,
+            "rechnungsnummer": document_id,
+            "rechnungsdatum": issue_date,
+            "waehrung": currency,
+            "sprache": "",
+            "lieferant": supplier,
+            "kunde": customer,
+            "lieferadresse": delivery,
+            "summen": totals,
+            "zahlung": zahlung,
+            "positionen_anzahl": len(positions)
+        },
+        "positionen": positions,
+        "kandidaten": refs
+    }
+
+def xml_parse_ubl(root):
+    root_name = xml_local_name(root.tag)
+
+    document_id = xml_first_text_path(root, [[root_name, "ID"]])
+    type_code = xml_first_text_path(root, [[root_name, "InvoiceTypeCode"], [root_name, "CreditNoteTypeCode"]])
+    issue_date = xml_first_text_path(root, [[root_name, "IssueDate"]])
+    currency = xml_first_text_path(root, [[root_name, "DocumentCurrencyCode"]])
+
+    supplier_node = xml_find_descendant_path(root, ["AccountingSupplierParty", "Party"])
+    customer_node = xml_find_descendant_path(root, ["AccountingCustomerParty", "Party"])
+    delivery_node = xml_find_descendant_path(root, ["Delivery", "DeliveryParty"])
+
+    supplier = xml_party_from_node(supplier_node)
+    customer = xml_party_from_node(customer_node)
+    delivery_party = xml_party_from_node(delivery_node)
+    delivery = {
+        "name": delivery_party.get("name", ""),
+        "adresse_text": delivery_party.get("adresse", ""),
+        "strasse": delivery_party.get("strasse", ""),
+        "plz": delivery_party.get("plz", ""),
+        "ort": delivery_party.get("ort", ""),
+        "land": delivery_party.get("land", ""),
+        "rohwerte": [x for x in [delivery_party.get("name"), delivery_party.get("strasse"), delivery_party.get("plz"), delivery_party.get("ort"), delivery_party.get("land")] if x]
+    }
+
+    totals = {
+        "gesamt_netto": xml_to_float(xml_first_text_path(root, [["LegalMonetaryTotal", "TaxExclusiveAmount"]])),
+        "gesamt_mwst": xml_to_float(xml_first_text_path(root, [["TaxTotal", "TaxAmount"]])),
+        "gesamt_brutto": xml_to_float(xml_first_text_path(root, [["LegalMonetaryTotal", "TaxInclusiveAmount"], ["LegalMonetaryTotal", "PayableAmount"]])),
+        "netto_rohwerte": xml_all_texts_path(root, ["LegalMonetaryTotal", "TaxExclusiveAmount"]),
+        "mwst_rohwerte": xml_all_texts_path(root, ["TaxTotal", "TaxAmount"]),
+        "brutto_rohwerte": xml_all_texts_path(root, ["LegalMonetaryTotal", "TaxInclusiveAmount"])
+    }
+
+    payment_notes = xml_all_texts_path(root, ["PaymentTerms", "Note"])
+    zahlung = {
+        "zahlungsziel_datum": "",
+        "zahlungsbedingungen_text": " | ".join(payment_notes),
+        "skonto_prozent": "",
+        "skonto_betrag": "",
+        "skonto_datum": ""
+    }
+
+    refs = {
+        "kommission_kandidaten": [],
+        "kostenstelle_kandidaten": [],
+        "baustelle_kandidaten": [],
+        "lieferschein_kandidaten": [],
+        "bestellnummer_kandidaten": [],
+        "referenz_kandidaten": [],
+        "auftrag_kandidaten": [],
+        "gutschrift_referenz_kandidaten": [],
+    }
+
+    buyer_ref = xml_first_text_path(root, [[root_name, "BuyerReference"]])
+    if buyer_ref:
+        add_candidate(refs["kommission_kandidaten"], buyer_ref, "xml_ubl", "BuyerReference")
+        add_candidate(refs["referenz_kandidaten"], buyer_ref, "xml_ubl", "BuyerReference")
+
+    order_ref = xml_first_text_path(root, [["OrderReference", "ID"]])
+    if order_ref:
+        add_candidate(refs["bestellnummer_kandidaten"], order_ref, "xml_ubl", "OrderReference")
+        add_candidate(refs["auftrag_kandidaten"], order_ref, "xml_ubl", "OrderReference")
+
+    delivery_ref = xml_first_text_path(root, [["DespatchDocumentReference", "ID"]])
+    if delivery_ref:
+        add_candidate(refs["lieferschein_kandidaten"], delivery_ref, "xml_ubl", "DespatchDocumentReference")
+
+    billing_ref = xml_first_text_path(root, [["BillingReference", "InvoiceDocumentReference", "ID"]])
+    if billing_ref:
+        add_candidate(refs["gutschrift_referenz_kandidaten"], billing_ref, "xml_ubl", "BillingReference")
+
+    if delivery.get("adresse_text"):
+        add_candidate(refs["baustelle_kandidaten"], delivery.get("adresse_text"), "xml_ubl", "DeliveryParty")
+
+    line_name = "InvoiceLine" if root_name == "Invoice" else "CreditNoteLine"
+    qty_name = "InvoicedQuantity" if root_name == "Invoice" else "CreditedQuantity"
+
+    positions = []
+    for idx, node in enumerate(xml_descendants(root, line_name), start=1):
+        qty_node = xml_direct_child(node, qty_name)
+        item = xml_direct_child(node, "Item")
+        price = xml_direct_child(node, "Price")
+
+        pos_nr = xml_text(xml_direct_child(node, "ID"))
+        description = " ".join(xml_all_texts_path(item, ["Description"]) + xml_all_texts_path(item, ["Name"])).strip()
+
+        seller_id = xml_first_text_path(item, [["SellersItemIdentification", "ID"]])
+        buyer_id = xml_first_text_path(item, [["BuyersItemIdentification", "ID"]])
+        global_id = xml_first_text_path(item, [["StandardItemIdentification", "ID"]])
+        manufacturer_id = xml_first_text_path(item, [["ManufacturersItemIdentification", "ID"]])
+
+        qty = xml_text(qty_node)
+        unit = qty_node.attrib.get("unitCode", "") if qty_node is not None else ""
+
+        line_total = xml_text(xml_direct_child(node, "LineExtensionAmount"))
+        net_price = xml_text(xml_direct_child(price, "PriceAmount"))
+        tax_rate = xml_first_text_path(item, [["ClassifiedTaxCategory", "Percent"]])
+
+        ean_candidates = []
+        digits = re.sub(r"\D", "", global_id or "")
+        if len(digits) in [8, 12, 13, 14]:
+            ean_candidates.append(digits)
+
+        all_ids = [x for x in [seller_id, buyer_id, global_id, manufacturer_id] if xml_clean_candidate(x)]
+
+        positions.append({
+            "positionsnummer": pos_nr or str(idx),
+            "beschreibung": description,
+            "menge": xml_to_float(qty),
+            "einheit": unit,
+            "einzelpreis_netto": xml_to_float(net_price),
+            "listenpreis_netto": None,
+            "gesamtpreis_netto": xml_to_float(line_total),
+            "mwst_satz": xml_to_float(tax_rate),
+            "lieferanten_artikelnummer": seller_id,
+            "kunden_artikelnummer": buyer_id,
+            "ean": ean_candidates[0] if ean_candidates else "",
+            "ean_kandidaten": ean_candidates,
+            "herstellernummer": manufacturer_id,
+            "herstellernummer_kandidaten": [],
+            "artikelnummer_kandidaten": {
+                "seller_assigned_id": seller_id,
+                "buyer_assigned_id": buyer_id,
+                "global_id": global_id,
+                "manufacturer_id": manufacturer_id,
+                "alle_ids": all_ids,
+                "nummern_aus_beschreibung": []
+            },
+            "lieferscheinnummer": "",
+            "raw_position_index": idx
+        })
+
+    dokumenttyp = "GUTSCHRIFT" if root_name == "CreditNote" else "RECHNUNG"
+
+    return {
+        "parser": "UBL",
+        "basisdaten": {
+            "dokumenttyp": dokumenttyp,
+            "dokumenttyp_code": type_code,
+            "rechnungsnummer": document_id,
+            "rechnungsdatum": issue_date,
+            "waehrung": currency,
+            "sprache": "",
+            "lieferant": supplier,
+            "kunde": customer,
+            "lieferadresse": delivery,
+            "summen": totals,
+            "zahlung": zahlung,
+            "positionen_anzahl": len(positions)
+        },
+        "positionen": positions,
+        "kandidaten": refs
+    }
+
+def xml_parse_invoice_standard(root, xml_text="", filename=""):
+    fmt, profil = xml_detect_format(root, xml_text, filename)
+    root_name = xml_local_name(root.tag)
+
+    if root_name in ["CrossIndustryInvoice", "CrossIndustryDocument"] or fmt in ["CII", "FACTUR_X", "ZUGFERD"]:
+        parsed = xml_parse_cii(root)
+    elif root_name in ["Invoice", "CreditNote"] or fmt in ["UBL", "XRECHNUNG"]:
+        parsed = xml_parse_ubl(root)
+    else:
+        parsed = {
+            "parser": "UNBEKANNT",
+            "basisdaten": {},
+            "positionen": [],
+            "kandidaten": {}
+        }
+
+    parsed["format"] = fmt
+    parsed["profil"] = profil
+    return parsed
 
 def build_pruefprofil(lieferanten_kategorie):
     kat = str(lieferanten_kategorie or "").strip().upper()
@@ -2187,7 +2274,11 @@ def match_kundenstamm(kunden_kontext_json, kandidaten, betriebskontext):
 
     search_values = []
     for key in ["kommission_kandidaten", "kostenstelle_kandidaten", "baustelle_kandidaten", "referenz_kandidaten"]:
-        search_values.extend(kandidaten.get(key, []))
+        for item in kandidaten.get(key, []):
+            if isinstance(item, dict):
+                search_values.append(item.get("wert", ""))
+            else:
+                search_values.append(item)
 
     search_values = [str(x).strip() for x in search_values if str(x or "").strip()]
 
@@ -2299,83 +2390,73 @@ def build_xml_context_for_extract(pdf_bytes, pdf_text_full, form_data):
         empty["e_rechnung"]["fehler"] = err
         return empty
 
-    # beste XML wählen
-    scored = []
+    best_item = None
+    best_root = None
+    best_score = -1
+    best_fmt = "UNBEKANNT"
+    best_profil = "UNBEKANNT"
+
     for item in xml_files:
-        fmt, profil = xml_detect_format(item.get("xml_text", ""), item.get("dateiname", ""))
+        root = xml_parse_root(item.get("xml_text", ""))
+        fmt, profil = xml_detect_format(root, item.get("xml_text", ""), item.get("dateiname", ""))
         score = 0
-        if fmt != "UNBEKANNT":
+        if root is not None:
             score += 50
+        if fmt != "UNBEKANNT":
+            score += 40
         if profil != "UNBEKANNT":
-            score += 20
-        if xml_parse_root(item.get("xml_text", "")) is not None:
-            score += 30
-        scored.append((score, item, fmt, profil))
+            score += 10
 
-    scored.sort(key=lambda x: x[0], reverse=True)
-    _, best, fmt, profil = scored[0]
+        if score > best_score:
+            best_score = score
+            best_item = item
+            best_root = root
+            best_fmt = fmt
+            best_profil = profil
 
-    xml_text = best.get("xml_text", "")
-    root = xml_parse_root(xml_text)
-
-    if root is None:
+    if best_root is None:
         empty["source_mode"] = "XML_FEHLER_PLUS_PDF"
         empty["e_rechnung"].update({
             "xml_vorhanden": "JA",
             "xml_lesbar": "NEIN",
-            "format": fmt,
-            "profil": profil,
-            "xml_dateiname": best.get("dateiname", ""),
+            "format": best_fmt,
+            "profil": best_profil,
+            "xml_dateiname": best_item.get("dateiname", "") if best_item else "",
             "status": "XML_FEHLER",
             "fehler": "XML_PARSE_FAILED"
         })
         return empty
 
-    supplier = xml_extract_party(root, ["SellerTradeParty", "AccountingSupplierParty", "SellerSupplierParty"])
-    customer = xml_extract_party(root, ["BuyerTradeParty", "AccountingCustomerParty", "BuyerCustomerParty"])
-    delivery = xml_extract_delivery(root)
-    totals = xml_extract_totals(root)
-    payment = xml_extract_payment(root)
-    positions = xml_extract_positions(root)
-    kandidaten = xml_extract_references(root, pdf_text_full)
-    feldinventar = xml_build_feldinventar(root)
+    parsed = xml_parse_invoice_standard(best_root, best_item.get("xml_text", ""), best_item.get("dateiname", ""))
+    feldinventar = xml_build_feldinventar(best_root)
 
-    basisdaten = {
-        "dokumenttyp": xml_guess_dokumenttyp(root),
-        "dokumenttyp_code": xml_first_text(root, ["TypeCode", "InvoiceTypeCode", "CreditNoteTypeCode"]),
-        "rechnungsnummer": xml_first_text(root, ["ID"]),
-        "rechnungsdatum": xml_first_text(root, ["IssueDate", "IssueDateTime", "DateTimeString"]),
-        "waehrung": xml_first_text(root, ["DocumentCurrencyCode", "InvoiceCurrencyCode", "TaxCurrencyCode"]),
-        "sprache": xml_first_text(root, ["LanguageID"]),
-        "lieferant": supplier,
-        "kunde": customer,
-        "lieferadresse": delivery,
-        "summen": totals,
-        "zahlung": payment,
-        "positionen_anzahl": len(positions),
-    }
-
+    kandidaten = parsed.get("kandidaten", {})
     kunden_match = match_kundenstamm(
         kunden_kontext_json=form_data.get("kunden_kontext_json", ""),
         kandidaten=kandidaten,
         betriebskontext=betriebskontext
     )
 
+    status = "XML_EXTRAHIERT"
+    if parsed.get("parser") == "UNBEKANNT":
+        status = "XML_FORMAT_UNBEKANNT"
+
     return {
         "source_mode": "XML_PLUS_PDF",
         "e_rechnung": {
             "xml_vorhanden": "JA",
             "xml_lesbar": "JA",
-            "format": fmt,
-            "profil": profil,
-            "xml_dateiname": best.get("dateiname", ""),
-            "status": "XML_EXTRAHIERT",
+            "format": parsed.get("format", best_fmt),
+            "profil": parsed.get("profil", best_profil),
+            "parser": parsed.get("parser", "UNBEKANNT"),
+            "xml_dateiname": best_item.get("dateiname", ""),
+            "status": status,
             "eingebettete_xml_anzahl": len(xml_files),
             "eingebettete_xml_dateien": [x.get("dateiname", "") for x in xml_files],
             "fehler": "",
         },
-        "xml_basisdaten": basisdaten,
-        "xml_positionen": positions,
+        "xml_basisdaten": parsed.get("basisdaten", {}),
+        "xml_positionen": parsed.get("positionen", []),
         "xml_kandidaten": kandidaten,
         "xml_feldinventar": feldinventar,
         "pruefprofil": pruefprofil,
