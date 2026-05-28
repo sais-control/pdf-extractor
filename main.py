@@ -1682,40 +1682,49 @@ def apply_kostenstelle_regex_to_refs(refs, kostenstelle_regex):
         return refs
 
     try:
-        pattern = re.compile(regex)
+        pattern = re.compile(regex, re.IGNORECASE)
     except Exception:
         return refs
 
-    search_values = []
+    if "kostenstelle_kandidaten" not in refs:
+        refs["kostenstelle_kandidaten"] = []
 
-    for key in [
+    search_keys = [
         "kommission_kandidaten",
         "bestellnummer_kandidaten",
         "referenz_kandidaten",
         "auftrag_kandidaten",
-        "baustelle_kandidaten"
-    ]:
+        "baustelle_kandidaten",
+        "lieferschein_kandidaten",
+    ]
+
+    for key in search_keys:
         for item in refs.get(key, []):
             if isinstance(item, dict):
                 value = item.get("wert", "")
             else:
                 value = item
 
-            if value:
-                search_values.append(str(value))
+            value = xml_norm_text(value)
+            if not value:
+                continue
 
-    for value in search_values:
-        for match in pattern.finditer(value):
-            found = xml_norm_text(match.group(0))
-            if found:
+            for match in pattern.finditer(value):
+                found = xml_norm_text(match.group(0))
+                if not found:
+                    continue
+
+                found = re.sub(r"\s+", "", found).upper()
+
                 add_candidate(
                     refs["kostenstelle_kandidaten"],
                     found,
                     "kostenstelle_regex",
-                    "Kostenstellen_Regex"
+                    f"Kostenstellen_Regex aus {key}"
                 )
 
     return refs
+
 
 def xml_extract_embedded_files_from_pdf(pdf_bytes):
     result = []
