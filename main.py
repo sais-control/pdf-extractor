@@ -2430,7 +2430,33 @@ def collect_candidate_values(kandidaten):
     return values
 
 
-def match_projekt_zuordnung(projekt_kontext_json, kostenstelle_regex, kandidaten, pdf_text_full=""):
+def match_projekt_zuordnung(
+    projekt_kontext_json,
+    kostenstelle_regex,
+    kandidaten,
+    pdf_text_full="",
+    lieferanten_kategorie="",
+    betrieb_name="",
+    betriebsadresse=""
+):
+    kat = str(lieferanten_kategorie or "").strip().upper()
+
+    interne_kategorien = {
+        "FIXKOSTEN",
+        "DIENSTLEISTER",
+        "ARBEITSKLEIDUNG",
+        "WERKSTATT",
+        "SONSTIGES",
+    }
+
+    if kat in interne_kategorien:
+        return {
+            "status": "SICHER",
+            "kommission": xml_norm_text(betrieb_name),
+            "kostenstelle": kat,
+            "baustelle": xml_norm_text(betriebsadresse)
+        }
+
     projekt_liste = parse_optional_json(projekt_kontext_json)
 
     result = {
@@ -2480,13 +2506,17 @@ def match_projekt_zuordnung(projekt_kontext_json, kostenstelle_regex, kandidaten
 
         if len(matches) == 1:
             row = matches[0]
-            result.update({
+            return {
                 "status": "SICHER",
-                "kommission": xml_norm_text(row.get("kundenname") or row.get("Kundenname") or row.get("auftragsbezeichnung") or row.get("Auftragsbezeichnung")),
+                "kommission": xml_norm_text(
+                    row.get("kundenname")
+                    or row.get("Kundenname")
+                    or row.get("auftragsbezeichnung")
+                    or row.get("Auftragsbezeichnung")
+                ),
                 "kostenstelle": xml_norm_text(row.get("kostenstelle") or row.get("Kostenstelle")),
                 "baustelle": xml_norm_text(row.get("baustellenadresse") or row.get("Baustellenadresse"))
-            })
-            return result
+            }
 
         if len(matches) > 1:
             result["status"] = "UNKLAR"
@@ -2517,13 +2547,17 @@ def match_projekt_zuordnung(projekt_kontext_json, kostenstelle_regex, kandidaten
 
     if len(address_matches) == 1:
         row = address_matches[0]
-        result.update({
+        return {
             "status": "SICHER",
-            "kommission": xml_norm_text(row.get("kundenname") or row.get("Kundenname") or row.get("auftragsbezeichnung") or row.get("Auftragsbezeichnung")),
+            "kommission": xml_norm_text(
+                row.get("kundenname")
+                or row.get("Kundenname")
+                or row.get("auftragsbezeichnung")
+                or row.get("Auftragsbezeichnung")
+            ),
             "kostenstelle": xml_norm_text(row.get("kostenstelle") or row.get("Kostenstelle")),
             "baustelle": xml_norm_text(row.get("baustellenadresse") or row.get("Baustellenadresse"))
-        })
-        return result
+        }
 
     if len(address_matches) > 1:
         result["status"] = "UNKLAR"
@@ -2732,6 +2766,9 @@ def build_xml_context_for_extract(pdf_bytes, pdf_text_full, form_data):
         kostenstelle_regex=betriebskontext.get("kostenstelle_regex", ""),
         kandidaten=kandidaten,
         pdf_text_full=pdf_text_full
+        lieferanten_kategorie=lieferanten_kategorie,
+        betrieb_name=betriebskontext.get("betrieb_name", ""),
+        betriebsadresse=betriebskontext.get("betriebsadresse", "")
     )
 
     status = "XML_EXTRAHIERT"
