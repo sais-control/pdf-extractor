@@ -1360,6 +1360,7 @@ def extract_pdf():
             result["pruefprofil"] = xml_context.get("pruefprofil", {})
             result["betriebskontext"] = xml_context.get("betriebskontext", {})
             result["kundenstamm_match"] = xml_context.get("kundenstamm_match", {})
+            result["projekt_zuordnung"] = xml_context.get("projekt_zuordnung", {})
 
             return jsonify(result), 200
 
