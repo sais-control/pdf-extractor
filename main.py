@@ -2334,6 +2334,202 @@ def parse_optional_json(value):
     except Exception:
         return []
 
+def normalize_simple_text(value):
+    s = str(value or "").lower().strip()
+    if not s:
+        return ""
+
+    replacements = {
+        "ä": "ae",
+        "ö": "oe",
+        "ü": "ue",
+        "ß": "ss",
+        "straße": "str",
+        "strasse": "str",
+        "str.": "str",
+        ".": " ",
+        ",": " ",
+        "-": " ",
+        "/": " ",
+    }
+
+    for a, b in replacements.items():
+        s = s.replace(a, b)
+
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def normalize_kostenstelle_core(value):
+    s = str(value or "").upper().strip()
+    if not s:
+        return ""
+
+    s = re.sub(r"[\s\-]", "", s)
+
+    if re.fullmatch(r"P1", s):
+        return "P1"
+
+    m = re.search(r"(\d{6})", s)
+    if m:
+        return m.group(1)
+
+    return s
+
+
+def extract_kostenstellen_from_text(text, kostenstelle_regex):
+    out = []
+    regex = xml_norm_text(kostenstelle_regex)
+
+    if not text or not regex:
+        return out
+
+    try:
+        pattern = re.compile(regex, re.IGNORECASE)
+    except Exception:
+        return out
+
+    for match in pattern.finditer(str(text)):
+        found = xml_norm_text(match.group(0))
+        if not found:
+            continue
+
+        found = re.sub(r"\s+", "", found).upper()
+
+        if found not in out:
+            out.append(found)
+
+    return out
+
+
+def collect_candidate_values(kandidaten):
+    values = []
+
+    keys = [
+        "kostenstelle_kandidaten",
+        "kommission_kandidaten",
+        "baustelle_kandidaten",
+        "referenz_kandidaten",
+        "auftrag_kandidaten",
+        "bestellnummer_kandidaten",
+        "lieferschein_kandidaten",
+    ]
+
+    for key in keys:
+        for item in kandidaten.get(key, []):
+            if isinstance(item, dict):
+                value = item.get("wert", "")
+            else:
+                value = item
+
+            value = xml_norm_text(value)
+            if value:
+                values.append(value)
+
+    return values
+
+
+def match_projekt_zuordnung(projekt_kontext_json, kostenstelle_regex, kandidaten, pdf_text_full=""):
+    projekt_liste = parse_optional_json(projekt_kontext_json)
+
+    result = {
+        "status": "KEIN_TREFFER",
+        "kommission": "",
+        "kostenstelle": "",
+        "baustelle": ""
+    }
+
+    if not projekt_liste:
+        return result
+
+    candidate_values = collect_candidate_values(kandidaten)
+
+    if pdf_text_full:
+        candidate_values.append(pdf_text_full)
+
+    kostenstellen_raw = []
+
+    for value in candidate_values:
+        for found in extract_kostenstellen_from_text(value, kostenstelle_regex):
+            if found not in kostenstellen_raw:
+                kostenstellen_raw.append(found)
+
+    kostenstellen_kerne = []
+
+    for value in kostenstellen_raw:
+        core = normalize_kostenstelle_core(value)
+        if core and core not in kostenstellen_kerne:
+            kostenstellen_kerne.append(core)
+
+    projekt_by_core = {}
+
+    for row in projekt_liste:
+        kostenstelle = xml_norm_text(row.get("kostenstelle") or row.get("Kostenstelle"))
+        if not kostenstelle:
+            continue
+
+        core = normalize_kostenstelle_core(kostenstelle)
+        if not core:
+            continue
+
+        projekt_by_core.setdefault(core, []).append(row)
+
+    for core in kostenstellen_kerne:
+        matches = projekt_by_core.get(core, [])
+
+        if len(matches) == 1:
+            row = matches[0]
+            result.update({
+                "status": "SICHER",
+                "kommission": xml_norm_text(row.get("kundenname") or row.get("Kundenname") or row.get("auftragsbezeichnung") or row.get("Auftragsbezeichnung")),
+                "kostenstelle": xml_norm_text(row.get("kostenstelle") or row.get("Kostenstelle")),
+                "baustelle": xml_norm_text(row.get("baustellenadresse") or row.get("Baustellenadresse"))
+            })
+            return result
+
+        if len(matches) > 1:
+            result["status"] = "UNKLAR"
+            return result
+
+    address_values = []
+
+    for value in candidate_values:
+        norm = normalize_simple_text(value)
+        if norm:
+            address_values.append(norm)
+
+    address_matches = []
+
+    for row in projekt_liste:
+        baustelle = xml_norm_text(row.get("baustellenadresse") or row.get("Baustellenadresse"))
+        if not baustelle:
+            continue
+
+        baustelle_norm = normalize_simple_text(baustelle)
+        if not baustelle_norm:
+            continue
+
+        for value_norm in address_values:
+            if baustelle_norm and baustelle_norm in value_norm:
+                address_matches.append(row)
+                break
+
+    if len(address_matches) == 1:
+        row = address_matches[0]
+        result.update({
+            "status": "SICHER",
+            "kommission": xml_norm_text(row.get("kundenname") or row.get("Kundenname") or row.get("auftragsbezeichnung") or row.get("Auftragsbezeichnung")),
+            "kostenstelle": xml_norm_text(row.get("kostenstelle") or row.get("Kostenstelle")),
+            "baustelle": xml_norm_text(row.get("baustellenadresse") or row.get("Baustellenadresse"))
+        })
+        return result
+
+    if len(address_matches) > 1:
+        result["status"] = "UNKLAR"
+        return result
+
+    return result
+
 def match_kundenstamm(kunden_kontext_json, kandidaten, betriebskontext):
     kunden = parse_optional_json(kunden_kontext_json)
 
@@ -2441,6 +2637,13 @@ def build_xml_context_for_extract(pdf_bytes, pdf_text_full, form_data):
 
     pruefprofil = build_pruefprofil(lieferanten_kategorie)
 
+    projekt_zuordnung_pdf = match_projekt_zuordnung(
+        projekt_kontext_json=form_data.get("projekt_kontext_json", ""),
+        kostenstelle_regex=betriebskontext.get("kostenstelle_regex", ""),
+        kandidaten={},
+        pdf_text_full=pdf_text_full
+    )
+
     empty = {
         "source_mode": "PDF_TEXT",
         "e_rechnung": {
@@ -2458,10 +2661,7 @@ def build_xml_context_for_extract(pdf_bytes, pdf_text_full, form_data):
         "xml_feldinventar": [],
         "pruefprofil": pruefprofil,
         "betriebskontext": betriebskontext,
-        "kundenstamm_match": {
-            "status": "NICHT_GEPRUEFT",
-            "kunde_gefunden": False
-        }
+        "projekt_zuordnung": projekt_zuordnung_pdf
     }
 
     xml_files, err = xml_extract_embedded_files_from_pdf(pdf_bytes)
@@ -2479,11 +2679,15 @@ def build_xml_context_for_extract(pdf_bytes, pdf_text_full, form_data):
     for item in xml_files:
         root = xml_parse_root(item.get("xml_text", ""))
         fmt, profil = xml_detect_format(root, item.get("xml_text", ""), item.get("dateiname", ""))
+
         score = 0
+
         if root is not None:
             score += 50
+
         if fmt != "UNBEKANNT":
             score += 40
+
         if profil != "UNBEKANNT":
             score += 10
 
@@ -2507,23 +2711,30 @@ def build_xml_context_for_extract(pdf_bytes, pdf_text_full, form_data):
         })
         return empty
 
-    parsed = xml_parse_invoice_standard(best_root, best_item.get("xml_text", ""), best_item.get("dateiname", ""))
+    parsed = xml_parse_invoice_standard(
+        best_root,
+        best_item.get("xml_text", ""),
+        best_item.get("dateiname", "")
+    )
+
     feldinventar = xml_build_feldinventar(best_root)
 
     kandidaten = parsed.get("kandidaten", {})
-    
+
     kandidaten = apply_kostenstelle_regex_to_refs(
         kandidaten,
         betriebskontext.get("kostenstelle_regex", "")
     )
 
-    kunden_match = match_kundenstamm(
-        kunden_kontext_json=form_data.get("kunden_kontext_json", ""),
+    projekt_zuordnung = match_projekt_zuordnung(
+        projekt_kontext_json=form_data.get("projekt_kontext_json", ""),
+        kostenstelle_regex=betriebskontext.get("kostenstelle_regex", ""),
         kandidaten=kandidaten,
-        betriebskontext=betriebskontext
+        pdf_text_full=pdf_text_full
     )
 
     status = "XML_EXTRAHIERT"
+
     if parsed.get("parser") == "UNBEKANNT":
         status = "XML_FORMAT_UNBEKANNT"
 
@@ -2547,7 +2758,7 @@ def build_xml_context_for_extract(pdf_bytes, pdf_text_full, form_data):
         "xml_feldinventar": feldinventar,
         "pruefprofil": pruefprofil,
         "betriebskontext": betriebskontext,
-        "kundenstamm_match": kunden_match
+        "projekt_zuordnung": projekt_zuordnung
     }
 
 # ============================================================
