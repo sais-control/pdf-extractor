@@ -1168,6 +1168,22 @@ def extract_pdf():
                     "ocr_error": None,
                 }
             }), 200
+            
+        action = request.form.get("action", "").strip().lower()
+
+        if action == "lieferschein_pruefung":
+            pruefung = pruefe_lieferschein_positionen(request.form)
+
+            return jsonify({
+                "ok": True,
+                "action": "lieferschein_pruefung",
+                "rechnung_id": request.form.get("rechnung_id", ""),
+                "rechnungsnummer": request.form.get("rechnungsnummer", ""),
+                "betrieb_id": request.form.get("betrieb_id", ""),
+                "lieferant_id": request.form.get("lieferant_id", ""),
+                "lieferschein_nr": request.form.get("lieferschein_nr", ""),
+                "lieferschein_pruefung": pruefung
+            }), 200
 
         file = request.files["file"]
 
@@ -2334,6 +2350,421 @@ def parse_optional_json(value):
         return []
     except Exception:
         return []
+        
+def parse_json_flexible(value):
+    if value is None:
+        return []
+
+    if isinstance(value, list):
+        return value
+
+    if isinstance(value, dict):
+        return [value]
+
+    s = str(value or "").strip()
+    if not s:
+        return []
+
+    try:
+        parsed = json.loads(s)
+        if isinstance(parsed, list):
+            return parsed
+        if isinstance(parsed, dict):
+            return [parsed]
+        return []
+    except Exception:
+        pass
+
+    try:
+        parsed = json.loads("[" + s + "]")
+        if isinstance(parsed, list):
+            return parsed
+        return []
+    except Exception:
+        return []
+
+
+def norm_lieferschein_nummer(value):
+    s = str(value or "").upper().strip()
+    if not s:
+        return ""
+
+    s = re.sub(r"^(LIEFERSCHEIN|LIEFERSCHEINNR|LIEFERSCHEINNUMMER|LS|LI|LNR|L-NR|NR|NO|#)\s*[:\-]?\s*", "", s)
+    s = re.sub(r"[\s\-_/]", "", s)
+
+    return s
+
+
+def norm_artikel_key(value):
+    s = str(value or "").upper().strip()
+    if not s:
+        return ""
+
+    s = re.sub(r"[\s\-_/\.]", "", s)
+    return s
+
+
+def norm_text_key(value):
+    s = str(value or "").lower().strip()
+    if not s:
+        return ""
+
+    s = s.replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss")
+    s = re.sub(r"[^a-z0-9]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def to_float_safe(value):
+    if value is None:
+        return 0.0
+
+    s = str(value).strip()
+    if not s:
+        return 0.0
+
+    s = s.replace("€", "").replace("%", "").replace(" ", "").replace("\u00a0", "")
+
+    if "," in s and "." in s:
+        s = s.replace(".", "").replace(",", ".")
+    elif "," in s:
+        s = s.replace(",", ".")
+
+    s = re.sub(r"[^0-9.\-]", "", s)
+
+    try:
+        return float(s)
+    except Exception:
+        return 0.0
+
+
+def normalize_rechnungs_position(pos):
+    artikelnummer = (
+        pos.get("artikelnummer")
+        or pos.get("lieferanten_artikelnummer")
+        or pos.get("Artikelnummer")
+        or ""
+    )
+
+    hersteller = (
+        pos.get("hersteller_artikelnummer")
+        or pos.get("herstellernummer")
+        or pos.get("Hersteller_Artikelnummer")
+        or ""
+    )
+
+    ean = pos.get("ean") or pos.get("EAN") or ""
+
+    menge = (
+        pos.get("menge")
+        or pos.get("Menge")
+        or pos.get("berechnete_menge")
+        or 0
+    )
+
+    return {
+        "pos_nr": str(pos.get("positionsnummer") or pos.get("pos_nr") or "").strip(),
+        "artikelnummer": str(artikelnummer or "").strip(),
+        "artikel_key": norm_artikel_key(artikelnummer),
+        "hersteller_artikelnummer": str(hersteller or "").strip(),
+        "hersteller_key": norm_artikel_key(hersteller),
+        "ean": str(ean or "").strip(),
+        "ean_key": norm_artikel_key(ean),
+        "beschreibung": str(pos.get("beschreibung") or "").strip(),
+        "beschreibung_key": norm_text_key(pos.get("beschreibung") or ""),
+        "menge": to_float_safe(menge),
+        "einheit": str(pos.get("einheit") or "").upper().strip(),
+        "raw": pos
+    }
+
+
+def normalize_lieferschein_position(pos):
+    artikelnummer = (
+        pos.get("artikelnummer")
+        or pos.get("lieferanten_artikelnummer")
+        or pos.get("Artikelnummer")
+        or ""
+    )
+
+    hersteller = (
+        pos.get("hersteller_artikelnummer")
+        or pos.get("herstellernummer")
+        or pos.get("Hersteller_Artikelnummer")
+        or ""
+    )
+
+    ean = pos.get("ean") or pos.get("EAN") or ""
+
+    menge = (
+        pos.get("gelieferte_menge")
+        or pos.get("menge")
+        or pos.get("Menge")
+        or 0
+    )
+
+    return {
+        "pos_nr": str(pos.get("pos_nr") or pos.get("positionsnummer") or "").strip(),
+        "artikelnummer": str(artikelnummer or "").strip(),
+        "artikel_key": norm_artikel_key(artikelnummer),
+        "hersteller_artikelnummer": str(hersteller or "").strip(),
+        "hersteller_key": norm_artikel_key(hersteller),
+        "ean": str(ean or "").strip(),
+        "ean_key": norm_artikel_key(ean),
+        "beschreibung": str(pos.get("beschreibung") or "").strip(),
+        "beschreibung_key": norm_text_key(pos.get("beschreibung") or ""),
+        "menge": to_float_safe(menge),
+        "einheit": str(pos.get("einheit") or "").upper().strip(),
+        "raw": pos
+    }
+
+
+def position_match_key(pos):
+    if pos.get("artikel_key"):
+        return "ARTIKEL:" + pos["artikel_key"]
+
+    if pos.get("hersteller_key"):
+        return "HERSTELLER:" + pos["hersteller_key"]
+
+    if pos.get("ean_key"):
+        return "EAN:" + pos["ean_key"]
+
+    if pos.get("beschreibung_key"):
+        return "TEXT:" + pos["beschreibung_key"]
+
+    return ""
+
+
+def flatten_lieferschein_hinweise(lieferscheine, separate_hinweise):
+    out = []
+
+    for h in parse_json_flexible(separate_hinweise):
+        if isinstance(h, dict):
+            out.append(h)
+
+    for ls in lieferscheine:
+        for field in ["lieferschein_hinweise", "lieferschein_hinweise_json", "hinweise_json", "hinweise"]:
+            value = ls.get(field)
+            for h in parse_json_flexible(value):
+                if isinstance(h, dict):
+                    out.append(h)
+
+    cleaned = []
+    seen = set()
+
+    for h in out:
+        typ = str(h.get("typ") or h.get("hinweis_typ") or "").strip().upper()
+        text = str(h.get("text") or h.get("hinweis") or "").strip()
+        pos = str(h.get("position") or h.get("pos_nr") or "").strip()
+        artikelnummer = str(h.get("artikelnummer") or "").strip()
+
+        key = f"{typ}|{text}|{pos}|{artikelnummer}"
+
+        if key in seen:
+            continue
+
+        seen.add(key)
+
+        cleaned.append({
+            "typ": typ,
+            "position": pos,
+            "artikelnummer": artikelnummer,
+            "text": text
+        })
+
+    return cleaned
+
+
+def pruefe_lieferschein_positionen(form_data):
+    rechnung_id = form_data.get("rechnung_id", "")
+    rechnungsnummer = form_data.get("rechnungsnummer", "")
+    betrieb_id = form_data.get("betrieb_id", "")
+    lieferant_id = form_data.get("lieferant_id", "")
+    lieferschein_nr = form_data.get("lieferschein_nr", "")
+
+    rechnung_positionen_raw = form_data.get("rechnung_positionen_json", "")
+    lieferschein_kandidaten_raw = form_data.get("lieferschein_kandidaten_json", "")
+    lieferschein_hinweise_raw = form_data.get("lieferschein_hinweise_json", "")
+
+    rechnung_positionen = parse_json_flexible(rechnung_positionen_raw)
+    lieferscheine = parse_json_flexible(lieferschein_kandidaten_raw)
+
+    result = {
+        "status": "KEIN_LIEFERSCHEIN",
+        "zugeordnete_lieferschein_ids": [],
+        "zugeordnete_lieferscheinnummern": [],
+        "gepruefte_lieferscheine_anzahl": 0,
+        "abweichung_details": "",
+        "nachlieferung_offen": "NEIN",
+        "hinweise_beruecksichtigt": [],
+        "positionen_geprueft": 0,
+        "positionen_ok": 0,
+        "positionen_abweichung": 0,
+        "fehlende_positionen": [],
+        "mengenabweichungen": []
+    }
+
+    if not lieferscheine:
+        result["status"] = "KEIN_LIEFERSCHEIN"
+        result["abweichung_details"] = "Kein passender Lieferschein gefunden."
+        return result
+
+    result["gepruefte_lieferscheine_anzahl"] = len(lieferscheine)
+
+    rechnung_ls_norm = norm_lieferschein_nummer(lieferschein_nr)
+
+    passende_lieferscheine = []
+
+    for ls in lieferscheine:
+        ls_nr = str(ls.get("lieferscheinnummer") or "").strip()
+        ls_norm = norm_lieferschein_nummer(ls_nr)
+
+        if not rechnung_ls_norm or not ls_norm or rechnung_ls_norm == ls_norm or rechnung_ls_norm in ls_norm or ls_norm in rechnung_ls_norm:
+            passende_lieferscheine.append(ls)
+
+    if not passende_lieferscheine:
+        result["status"] = "KEIN_LIEFERSCHEIN"
+        result["abweichung_details"] = f"Keine passende Lieferscheinnummer gefunden. Rechnung: {lieferschein_nr}"
+        return result
+
+    for ls in passende_lieferscheine:
+        ls_id = str(ls.get("lieferschein_id") or ls.get("Lieferschein_ID") or "").strip()
+        ls_nr = str(ls.get("lieferscheinnummer") or ls.get("Lieferscheinnummer") or "").strip()
+
+        if ls_id and ls_id not in result["zugeordnete_lieferschein_ids"]:
+            result["zugeordnete_lieferschein_ids"].append(ls_id)
+
+        if ls_nr and ls_nr not in result["zugeordnete_lieferscheinnummern"]:
+            result["zugeordnete_lieferscheinnummern"].append(ls_nr)
+
+    hinweise = flatten_lieferschein_hinweise(passende_lieferscheine, lieferschein_hinweise_raw)
+    result["hinweise_beruecksichtigt"] = hinweise
+
+    has_nachlieferung_hinweis = any(h.get("typ") == "NACHLIEFERUNG" for h in hinweise)
+    has_teillieferung_hinweis = any(h.get("typ") == "TEILLIEFERUNG" for h in hinweise)
+    has_pruefung_hinweis = any(h.get("typ") in ["PRUEFUNG_NOETIG", "UNLESERLICH", "HANDSCHRIFTLICHE_AENDERUNG", "MENGE_GEAENDERT", "POSITION_GESTRICHEN", "POSITION_ERGAENZT"] for h in hinweise)
+
+    ls_positions_by_key = {}
+
+    for ls in passende_lieferscheine:
+        pos_list = parse_json_flexible(ls.get("positionen_json") or ls.get("Positionen_JSON") or "")
+
+        for raw_pos in pos_list:
+            if not isinstance(raw_pos, dict):
+                continue
+
+            pos = normalize_lieferschein_position(raw_pos)
+            key = position_match_key(pos)
+
+            if not key:
+                continue
+
+            if key not in ls_positions_by_key:
+                ls_positions_by_key[key] = {
+                    "menge": 0.0,
+                    "einheit": pos.get("einheit", ""),
+                    "artikelnummer": pos.get("artikelnummer", ""),
+                    "beschreibung": pos.get("beschreibung", ""),
+                    "positionen": []
+                }
+
+            ls_positions_by_key[key]["menge"] += pos.get("menge", 0.0)
+            ls_positions_by_key[key]["positionen"].append(pos)
+
+    rechnung_positions_norm = []
+
+    for raw_pos in rechnung_positionen:
+        if not isinstance(raw_pos, dict):
+            continue
+
+        pos = normalize_rechnungs_position(raw_pos)
+        key = position_match_key(pos)
+
+        if not key:
+            continue
+
+        pos["match_key"] = key
+        rechnung_positions_norm.append(pos)
+
+    result["positionen_geprueft"] = len(rechnung_positions_norm)
+
+    if not rechnung_positions_norm:
+        result["status"] = "PRUEFUNG_NOETIG"
+        result["abweichung_details"] = "Keine prüfbaren Rechnungspositionen vorhanden."
+        return result
+
+    fehlende = []
+    mengenabweichungen = []
+    ok_count = 0
+
+    for rpos in rechnung_positions_norm:
+        key = rpos.get("match_key")
+        ls_match = ls_positions_by_key.get(key)
+
+        if not ls_match:
+            fehlende.append({
+                "positionsnummer": rpos.get("pos_nr", ""),
+                "artikelnummer": rpos.get("artikelnummer", ""),
+                "beschreibung": rpos.get("beschreibung", ""),
+                "rechnungsmenge": rpos.get("menge", 0),
+                "einheit": rpos.get("einheit", "")
+            })
+            continue
+
+        r_menge = rpos.get("menge", 0.0)
+        l_menge = ls_match.get("menge", 0.0)
+
+        if abs(r_menge - l_menge) <= 0.0001:
+            ok_count += 1
+            continue
+
+        mengenabweichungen.append({
+            "positionsnummer": rpos.get("pos_nr", ""),
+            "artikelnummer": rpos.get("artikelnummer", ""),
+            "beschreibung": rpos.get("beschreibung", ""),
+            "rechnungsmenge": r_menge,
+            "gelieferte_menge": l_menge,
+            "differenz": round(r_menge - l_menge, 6),
+            "einheit": rpos.get("einheit", "")
+        })
+
+    result["positionen_ok"] = ok_count
+    result["fehlende_positionen"] = fehlende
+    result["mengenabweichungen"] = mengenabweichungen
+    result["positionen_abweichung"] = len(fehlende) + len(mengenabweichungen)
+
+    details = []
+
+    if fehlende:
+        details.append(f"{len(fehlende)} Rechnungsposition(en) nicht im Lieferschein gefunden.")
+
+    if mengenabweichungen:
+        details.append(f"{len(mengenabweichungen)} Mengenabweichung(en) gefunden.")
+
+    if hinweise:
+        details.append(f"{len(hinweise)} Lieferschein-Hinweis(e) berücksichtigt.")
+
+    if not fehlende and not mengenabweichungen:
+        if has_pruefung_hinweis:
+            result["status"] = "PRUEFUNG_NOETIG"
+        else:
+            result["status"] = "OK"
+
+        result["abweichung_details"] = " ".join(details) if details else "Lieferscheinpositionen stimmen mit Rechnung überein."
+        return result
+
+    if has_nachlieferung_hinweis:
+        result["status"] = "NACHLIEFERUNG_OFFEN"
+        result["nachlieferung_offen"] = "JA"
+    elif has_teillieferung_hinweis:
+        result["status"] = "TEILLIEFERUNG"
+    elif mengenabweichungen and not fehlende:
+        result["status"] = "TEILLIEFERUNG"
+    else:
+        result["status"] = "ABWEICHUNG"
+
+    result["abweichung_details"] = " ".join(details) if details else "Abweichung zwischen Rechnung und Lieferschein gefunden."
+
+    return result
 
 def normalize_simple_text(value):
     s = str(value or "").lower().strip()
