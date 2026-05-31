@@ -2671,13 +2671,17 @@ def build_xml_context_for_extract(pdf_bytes, pdf_text_full, form_data):
     }
 
     pruefprofil = build_pruefprofil(lieferanten_kategorie)
-
+    
     projekt_zuordnung_pdf = match_projekt_zuordnung(
         projekt_kontext_json=form_data.get("projekt_kontext_json", ""),
         kostenstelle_regex=betriebskontext.get("kostenstelle_regex", ""),
         kandidaten={},
-        pdf_text_full=pdf_text_full
+        pdf_text_full=pdf_text_full,
+        lieferanten_kategorie=lieferanten_kategorie,
+        betrieb_name=betriebskontext.get("betrieb_name", ""),
+        betriebsadresse=betriebskontext.get("betriebsadresse", "")
     )
+
 
     empty = {
         "source_mode": "PDF_TEXT",
