@@ -2441,15 +2441,14 @@ def match_projekt_zuordnung(
 ):
     kat = str(lieferanten_kategorie or "").strip().upper()
 
-    interne_kategorien = {
-        "FIXKOSTEN",
-        "DIENSTLEISTER",
-        "ARBEITSKLEIDUNG",
-        "WERKSTATT",
-        "SONSTIGES",
+    projekt_kategorien = {
+        "GROSSHANDEL",
+        "HERSTELLER_MATERIAL",
+        "HERSTELLER_LEISTUNG",
+        "SUBUNTERNEHMER",
     }
 
-    if kat in interne_kategorien:
+    if kat and kat not in projekt_kategorien:
         return {
             "status": "SICHER",
             "kommission": xml_norm_text(betrieb_name),
