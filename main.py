@@ -2290,12 +2290,12 @@ def build_pruefprofil(lieferanten_kategorie):
         profile.update({
             "artikelpruefung": "JA",
             "projektpruefung": "JA",
-            "lieferscheinnummer_relevant": "JA_WENN_VORHANDEN",
+            "lieferscheinnummer_relevant": "JA",
             "ean_relevant": "JA_WENN_VORHANDEN",
             "herstellernummer_relevant": "JA_WENN_VORHANDEN",
             "standard_zuordnung": "PROJEKT",
             "artikelnummer_fehlt_ist_fehler": "JA_BEI_MATERIALPOSITION",
-            "kommission_fehlt_ist_fehler": "NUR_WENN_KEIN_ANDERER_PROJEKTBEZUG"
+            "kommission_fehlt_ist_fehler": "JA"
         })
 
     elif kat == "HERSTELLER_LEISTUNG":
@@ -2307,7 +2307,7 @@ def build_pruefprofil(lieferanten_kategorie):
             "herstellernummer_relevant": "JA_WENN_VORHANDEN",
             "standard_zuordnung": "PROJEKT",
             "artikelnummer_fehlt_ist_fehler": "NEIN_BEI_LEISTUNG_ARBEIT_SERVICE",
-            "kommission_fehlt_ist_fehler": "NUR_WENN_KEIN_ANDERER_PROJEKTBEZUG"
+            "kommission_fehlt_ist_fehler": "JA"
         })
 
     elif kat == "SUBUNTERNEHMER":
@@ -2316,7 +2316,7 @@ def build_pruefprofil(lieferanten_kategorie):
             "projektpruefung": "JA",
             "standard_zuordnung": "PROJEKT",
             "artikelnummer_fehlt_ist_fehler": "NEIN",
-            "kommission_fehlt_ist_fehler": "NUR_WENN_KEIN_ANDERER_PROJEKTBEZUG"
+            "kommission_fehlt_ist_fehler": "JA"
         })
 
     elif kat in ["HANDEL_ALLGEMEIN", "DIENSTLEISTER", "FIXKOSTEN", "ARBEITSKLEIDUNG"]:
