@@ -1109,6 +1109,23 @@ def health():
 @app.route("/extract", methods=["POST"])
 def extract_pdf():
     try:
+
+        action = request.form.get("action", "").strip().lower()
+
+        if action == "lieferschein_pruefung":
+            pruefung = pruefe_lieferschein_positionen(request.form)
+
+            return jsonify({
+                "ok": True,
+                "action": "lieferschein_pruefung",
+                "rechnung_id": request.form.get("rechnung_id", ""),
+                "rechnungsnummer": request.form.get("rechnungsnummer", ""),
+                "betrieb_id": request.form.get("betrieb_id", ""),
+                "lieferant_id": request.form.get("lieferant_id", ""),
+                "lieferschein_nr": request.form.get("lieferschein_nr", ""),
+                "lieferschein_pruefung": pruefung
+            }), 200
+        
         if "file" not in request.files:
             return jsonify({
                 "ok": False,
@@ -1169,21 +1186,6 @@ def extract_pdf():
                 }
             }), 200
             
-        action = request.form.get("action", "").strip().lower()
-
-        if action == "lieferschein_pruefung":
-            pruefung = pruefe_lieferschein_positionen(request.form)
-
-            return jsonify({
-                "ok": True,
-                "action": "lieferschein_pruefung",
-                "rechnung_id": request.form.get("rechnung_id", ""),
-                "rechnungsnummer": request.form.get("rechnungsnummer", ""),
-                "betrieb_id": request.form.get("betrieb_id", ""),
-                "lieferant_id": request.form.get("lieferant_id", ""),
-                "lieferschein_nr": request.form.get("lieferschein_nr", ""),
-                "lieferschein_pruefung": pruefung
-            }), 200
 
         file = request.files["file"]
 
