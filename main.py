@@ -2590,6 +2590,16 @@ def pruefe_lieferschein_positionen(form_data):
     rechnung_positionen = parse_json_flexible(rechnung_positionen_raw)
     lieferscheine = parse_json_flexible(lieferschein_kandidaten_raw)
 
+    lieferscheine = [
+        ls for ls in lieferscheine
+        if isinstance(ls, dict)
+        and (
+            str(ls.get("lieferschein_id") or "").strip()
+            or str(ls.get("lieferscheinnummer") or "").strip()
+            or parse_json_flexible(ls.get("positionen_json") or "")
+        )
+    ]
+    
     result = {
         "status": "KEIN_LIEFERSCHEIN",
         "zugeordnete_lieferschein_ids": [],
